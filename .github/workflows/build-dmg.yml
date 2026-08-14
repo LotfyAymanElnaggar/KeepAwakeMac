@@ -22,9 +22,11 @@ jobs:
           SRC=(
             KeepAwakeMac/KeepAwakeMacApp.swift
             KeepAwakeMac/AwakeManager.swift
+            KeepAwakeMac/SystemPowerVeto.swift
             KeepAwakeMac/AwakeMenuView.swift
             KeepAwakeMac/SessionDuration.swift
           )
+          HELPER_SRC=KeepAwakeMac/LidWatchdog.swift
 
           mkdir -p build/arm64 build/x86_64 "build/KeepAwakeMac.app/Contents/MacOS"
 
@@ -42,10 +44,30 @@ jobs:
             -framework SwiftUI -framework AppKit -framework CoreGraphics -framework IOKit \
             -o build/x86_64/KeepAwakeMac
 
+          xcrun swiftc "$HELPER_SRC" \
+            -parse-as-library \
+            -O \
+            -target arm64-apple-macos13.0 \
+            -framework CoreGraphics -framework IOKit \
+            -o build/arm64/KeepAwakeLidWatchdog
+
+          xcrun swiftc "$HELPER_SRC" \
+            -parse-as-library \
+            -O \
+            -target x86_64-apple-macos13.0 \
+            -framework CoreGraphics -framework IOKit \
+            -o build/x86_64/KeepAwakeLidWatchdog
+
           lipo -create \
             build/arm64/KeepAwakeMac \
             build/x86_64/KeepAwakeMac \
             -output "build/KeepAwakeMac.app/Contents/MacOS/KeepAwakeMac"
+
+          lipo -create \
+            build/arm64/KeepAwakeLidWatchdog \
+            build/x86_64/KeepAwakeLidWatchdog \
+            -output "build/KeepAwakeMac.app/Contents/MacOS/KeepAwakeLidWatchdog"
+          chmod +x "build/KeepAwakeMac.app/Contents/MacOS/KeepAwakeLidWatchdog"
 
           cp KeepAwakeMac/Info.plist "build/KeepAwakeMac.app/Contents/Info.plist"
           /usr/libexec/PlistBuddy -c 'Set :CFBundleIdentifier com.lotfy.keepawakemac' "build/KeepAwakeMac.app/Contents/Info.plist"
@@ -56,6 +78,7 @@ jobs:
           codesign --force --deep --sign - "build/KeepAwakeMac.app"
           codesign --verify --deep --strict --verbose=2 "build/KeepAwakeMac.app"
           file "build/KeepAwakeMac.app/Contents/MacOS/KeepAwakeMac"
+          file "build/KeepAwakeMac.app/Contents/MacOS/KeepAwakeLidWatchdog"
 
       - name: Create DMG
         shell: bash
