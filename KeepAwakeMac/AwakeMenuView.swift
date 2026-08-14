@@ -56,7 +56,8 @@ struct AwakeMenuView: View {
             }
             .padding(16)
         }
-        .frame(width: 400, maxHeight: 690)
+        .frame(width: 400)
+        .frame(maxHeight: 690)
         .onAppear {
             manager.allowDisplaySleep = storedAllowDisplaySleep
             manager.lowBatteryCutoff = storedLowBatteryCutoff
