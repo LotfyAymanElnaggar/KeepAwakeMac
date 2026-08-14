@@ -51,15 +51,19 @@ struct AwakeMenuView: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
 
+                if let displayMessage = manager.displaySleepStatus {
+                    Label(displayMessage, systemImage: "display")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
                 Divider()
                 footer
             }
             .padding(16)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
-        // MenuBarExtra's window style can collapse a root ScrollView when it
-        // only has a maximum height. Give the popover an explicit content
-        // size and let the ScrollView handle overflow inside that window.
         .frame(width: 400, height: 620)
         .onAppear {
             manager.allowDisplaySleep = storedAllowDisplaySleep
@@ -143,8 +147,8 @@ struct AwakeMenuView: View {
             ))
 
             Text(storedAllowDisplaySleep
-                 ? "The display may turn off while the Mac stays awake."
-                 : "Both the Mac and display are kept awake during the session.")
+                 ? "The display may sleep while the Mac stays awake. In lid mode, KeepAwakeMac also forces display sleep when the lid closes and no external display is connected."
+                 : "Both the Mac and display are kept awake during the session, including lid mode.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -162,6 +166,18 @@ struct AwakeMenuView: View {
                         .font(.caption.monospaced())
                         .foregroundStyle(.secondary)
                 }
+            }
+
+            if manager.lidClosedModeEnabled {
+                HStack(spacing: 8) {
+                    Label(manager.lidIsClosed ? "Lid closed" : "Lid open",
+                          systemImage: manager.lidIsClosed ? "rectangle.compress.vertical" : "rectangle.expand.vertical")
+                    if manager.hasExternalDisplay {
+                        Text("· external display")
+                    }
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
             }
 
             if manager.lidAuthorizationInstalled {
