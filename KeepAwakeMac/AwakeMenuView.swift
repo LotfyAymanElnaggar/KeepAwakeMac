@@ -51,6 +51,12 @@ struct AwakeMenuView: View {
                 .toggleStyle(.switch)
             }
 
+            if manager.isActive {
+                Label("Strong keep-awake mode active", systemImage: "checkmark.shield")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
             Divider()
 
             VStack(alignment: .leading, spacing: 8) {
@@ -83,7 +89,7 @@ struct AwakeMenuView: View {
                 Text("Display")
                     .font(.subheadline.weight(.semibold))
 
-                Toggle("Allow display to turn off", isOn: Binding(
+                Toggle("Allow display to sleep while lid is open", isOn: Binding(
                     get: { storedAllowDisplaySleep },
                     set: { newValue in
                         storedAllowDisplaySleep = newValue
@@ -95,8 +101,20 @@ struct AwakeMenuView: View {
                 ))
 
                 Text(storedAllowDisplaySleep
-                     ? "The Mac stays awake, but the display may sleep normally."
-                     : "The Mac and its display stay awake during the session.")
+                     ? "Idle display sleep is allowed, while the Mac is kept awake. This applies with the MacBook lid open."
+                     : "The Mac and its display are both kept awake during the session.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 6) {
+                Label("MacBook lid", systemImage: "laptopcomputer")
+                    .font(.subheadline.weight(.semibold))
+
+                Text("Closing the built-in lid is a separate macOS sleep request. KeepAwakeMac cannot reliably override it or keep the graphical user session unlocked. Apple's supported closed-lid setup uses external power, an external display, and an external keyboard/mouse.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -127,13 +145,13 @@ struct AwakeMenuView: View {
                 }
             }
 
-            Text("Closing a MacBook lid may still put the Mac to sleep. When a timed session ends, normal macOS sleep/lock settings resume.")
+            Text("When a timed session ends, normal macOS sleep and lock settings resume.")
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
                 .fixedSize(horizontal: false, vertical: true)
         }
         .padding(16)
-        .frame(width: 340)
+        .frame(width: 360)
         .onAppear {
             manager.allowDisplaySleep = storedAllowDisplaySleep
         }
