@@ -5,7 +5,6 @@ private struct ShellResult {
     let status: Int32
     let stdout: String
     let stderr: String
-
     var succeeded: Bool { status == 0 }
 }
 
@@ -16,7 +15,6 @@ private enum ShellRunner {
                 let process = Process()
                 let output = Pipe()
                 let error = Pipe()
-
                 process.executableURL = URL(fileURLWithPath: executable)
                 process.arguments = arguments
                 process.standardOutput = output
@@ -71,12 +69,7 @@ private enum ShellRunner {
         process.arguments = ["/bin/sh", "-c", script]
         process.standardOutput = FileHandle.nullDevice
         process.standardError = FileHandle.nullDevice
-        do {
-            try process.run()
-        } catch {
-            // The app still keeps its own cleanup path. Failure to start the
-            // watchdog is surfaced through diagnostics rather than crashing.
-        }
+        try? process.run()
     }
 
     private static func shellQuote(_ value: String) -> String {
@@ -93,6 +86,8 @@ final class AwakeManager: ObservableObject {
     @Published var lowBatteryCutoff = 15
     @Published var lastError: String?
 
+    // This now means specifically: KeepAwakeMac's own sudoers fragment exists.
+    // It is intentionally NOT inferred from another app granting a similar command.
     @Published private(set) var lidAuthorizationInstalled = false
     @Published private(set) var lidClosedModeEnabled = false
     @Published private(set) var lidChanging = false
@@ -100,10 +95,12 @@ final class AwakeManager: ObservableObject {
     @Published private(set) var batteryPercent: Int?
     @Published private(set) var onBatteryPower = false
     @Published private(set) var lidStatusMessage: String?
+    @Published private(set) var sudoConfigurationWarning: String?
 
     private let ownershipKey = "KeepAwakeMac.ownsSleepDisabled"
     private let sudoersPath = "/etc/sudoers.d/keepawakemac"
 
+    private var pmsetPrivilegeAvailable = false
     private var systemAssertionID: IOPMAssertionID = 0
     private var idleSystemAssertionID: IOPMAssertionID = 0
     private var displayAssertionID: IOPMAssertionID = 0
@@ -126,17 +123,16 @@ final class AwakeManager: ObservableObject {
         await refreshBatteryState()
 
         if UserDefaults.standard.bool(forKey: ownershipKey), sleepDisabledReadback {
-            if lidAuthorizationInstalled {
-                let result = await setGlobalSleepDisabled(false)
-                if result {
+            if pmsetPrivilegeAvailable {
+                if await setGlobalSleepDisabled(false) {
                     UserDefaults.standard.set(false, forKey: ownershipKey)
                     removeWatchdogToken()
                     lidStatusMessage = "Recovered normal sleep after an interrupted previous session."
                 } else {
-                    lastError = "A previous lid-closed session may still have SleepDisabled enabled. Use Diagnostics or run: sudo pmset -a disablesleep 0"
+                    lastError = "A previous lid-closed session may still have SleepDisabled enabled. Run: sudo pmset -a disablesleep 0"
                 }
             } else {
-                lastError = "A previous lid-closed session may still have SleepDisabled enabled, but authorization is missing. Run: sudo pmset -a disablesleep 0"
+                lastError = "A previous lid-closed session may still have SleepDisabled enabled, but pmset authorization is unavailable. Run: sudo pmset -a disablesleep 0"
             }
         } else if !sleepDisabledReadback {
             UserDefaults.standard.set(false, forKey: ownershipKey)
@@ -148,23 +144,14 @@ final class AwakeManager: ObservableObject {
         lastError = nil
 
         let reason = "KeepAwakeMac session enabled by user"
-
-        let systemResult = createAssertion(
-            type: kIOPMAssertionTypePreventSystemSleep,
-            reason: reason,
-            id: &systemAssertionID
-        )
+        let systemResult = createAssertion(type: kIOPMAssertionTypePreventSystemSleep, reason: reason, id: &systemAssertionID)
         guard systemResult == kIOReturnSuccess else {
             rollbackAssertions()
             lastError = "Could not create the system-sleep assertion (error \(systemResult))."
             return
         }
 
-        let idleResult = createAssertion(
-            type: kIOPMAssertionTypePreventUserIdleSystemSleep,
-            reason: reason,
-            id: &idleSystemAssertionID
-        )
+        let idleResult = createAssertion(type: kIOPMAssertionTypePreventUserIdleSystemSleep, reason: reason, id: &idleSystemAssertionID)
         guard idleResult == kIOReturnSuccess else {
             rollbackAssertions()
             lastError = "Could not create the idle-sleep assertion (error \(idleResult))."
@@ -172,11 +159,7 @@ final class AwakeManager: ObservableObject {
         }
 
         if !allowDisplaySleep {
-            let displayResult = createAssertion(
-                type: kIOPMAssertionTypePreventUserIdleDisplaySleep,
-                reason: reason,
-                id: &displayAssertionID
-            )
+            let displayResult = createAssertion(type: kIOPMAssertionTypePreventUserIdleDisplaySleep, reason: reason, id: &displayAssertionID)
             guard displayResult == kIOReturnSuccess else {
                 rollbackAssertions()
                 lastError = "Could not create the display-sleep assertion (error \(displayResult))."
@@ -184,25 +167,19 @@ final class AwakeManager: ObservableObject {
             }
         }
 
-        var activityOptions: ProcessInfo.ActivityOptions = [.userInitiated, .idleSystemSleepDisabled]
-        if !allowDisplaySleep {
-            activityOptions.insert(.idleDisplaySleepDisabled)
-        }
-        activityToken = ProcessInfo.processInfo.beginActivity(options: activityOptions, reason: reason)
+        var options: ProcessInfo.ActivityOptions = [.userInitiated, .idleSystemSleepDisabled]
+        if !allowDisplaySleep { options.insert(.idleDisplaySleepDisabled) }
+        activityToken = ProcessInfo.processInfo.beginActivity(options: options, reason: reason)
         isActive = true
 
         if let duration {
             let safeDuration = max(1, duration)
-            let deadline = Date().addingTimeInterval(safeDuration)
-            endDate = deadline
+            endDate = Date().addingTimeInterval(safeDuration)
             remainingSeconds = safeDuration
 
             endTimer = Timer.scheduledTimer(withTimeInterval: safeDuration, repeats: false) { [weak self] _ in
-                Task { @MainActor in
-                    await self?.stopAndRestoreSleep()
-                }
+                Task { @MainActor in await self?.stopAndRestoreSleep() }
             }
-
             ticker = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
                 Task { @MainActor in
                     guard let self, let endDate = self.endDate else { return }
@@ -230,9 +207,7 @@ final class AwakeManager: ObservableObject {
     func stopAndRestoreSleep() async {
         let shouldDisarm = lidClosedModeEnabled || ownsSleepDisabled || UserDefaults.standard.bool(forKey: ownershipKey)
         stopCore(clearError: true, disarmLid: false)
-        if shouldDisarm {
-            await disableLidClosedModeIfOwned()
-        }
+        if shouldDisarm { await disableLidClosedModeIfOwned() }
     }
 
     func installLidAuthorization() async {
@@ -240,10 +215,10 @@ final class AwakeManager: ObservableObject {
         lidChanging = true
         defer { lidChanging = false }
         lastError = nil
+        lidStatusMessage = nil
 
         let username = NSUserName()
-        let allowed = username.range(of: "^[A-Za-z0-9._-]+$", options: .regularExpression) != nil
-        guard allowed else {
+        guard username.range(of: "^[A-Za-z0-9._-]+$", options: .regularExpression) != nil else {
             lastError = "Your macOS username contains characters this installer does not support."
             return
         }
@@ -251,13 +226,19 @@ final class AwakeManager: ObservableObject {
         let rule = "\(username) ALL=(root) NOPASSWD: /usr/bin/pmset -a disablesleep 1, /usr/bin/pmset -a disablesleep 0"
         let safeRule = rule.replacingOccurrences(of: "'", with: "'\\''")
         let tempPath = "/tmp/keepawakemac.sudoers.\(getpid())"
-        let command = "umask 077; printf '%s\\n' '\(safeRule)' > '\(tempPath)' && /usr/sbin/visudo -cf '\(tempPath)' && /usr/sbin/chown root:wheel '\(tempPath)' && /bin/chmod 0440 '\(tempPath)' && /bin/mkdir -p /etc/sudoers.d && /bin/mv '\(tempPath)' '\(sudoersPath)' && /usr/sbin/visudo -c"
+
+        // Important: validate ONLY our fragment. A global `visudo -c` can fail
+        // because of an unrelated third-party file (for example Amphetamine's
+        // PowerProtect fragment), even though our fragment is valid.
+        let command = "umask 077; printf '%s\\n' '\(safeRule)' > '\(tempPath)' && /usr/sbin/visudo -cf '\(tempPath)' && /usr/sbin/chown root:wheel '\(tempPath)' && /bin/chmod 0440 '\(tempPath)' && /bin/mkdir -p /etc/sudoers.d && /bin/mv '\(tempPath)' '\(sudoersPath)' && /usr/sbin/visudo -cf '\(sudoersPath)'"
 
         let result = await ShellRunner.runAdministratorCommand(command)
         await refreshLidAuthorizationStatus()
 
-        if result.succeeded && lidAuthorizationInstalled {
-            lidStatusMessage = "Authorization installed. It permits only pmset disablesleep 1 and 0."
+        if result.succeeded && lidAuthorizationInstalled && pmsetPrivilegeAvailable {
+            lidStatusMessage = "KeepAwakeMac authorization installed. It permits only pmset disablesleep 1 and 0."
+        } else if result.succeeded && lidAuthorizationInstalled {
+            lastError = "The KeepAwakeMac rule was installed, but sudo did not make the two pmset commands available. Another sudoers configuration problem may be interfering."
         } else {
             lastError = "Could not install lid authorization. \(cleanError(result))"
         }
@@ -268,24 +249,41 @@ final class AwakeManager: ObservableObject {
         lidChanging = true
         defer { lidChanging = false }
         lastError = nil
+        lidStatusMessage = nil
 
         if lidClosedModeEnabled || ownsSleepDisabled || UserDefaults.standard.bool(forKey: ownershipKey) {
             await disableLidClosedModeIfOwned()
         }
 
-        let result = await ShellRunner.runAdministratorCommand("/bin/rm -f '\(sudoersPath)' && /usr/sbin/visudo -c")
+        // Remove only our file. Do NOT globally validate every sudoers.d file;
+        // a broken file belonging to another app must not make our removal fail.
+        let result = await ShellRunner.runAdministratorCommand("/bin/rm -f '\(sudoersPath)'")
         await refreshLidAuthorizationStatus()
+
         if result.succeeded && !lidAuthorizationInstalled {
-            lidStatusMessage = "Lid authorization removed."
+            if pmsetPrivilegeAvailable {
+                lidStatusMessage = "KeepAwakeMac authorization removed. A compatible pmset permission is still being provided by another sudoers rule."
+            } else {
+                lidStatusMessage = "KeepAwakeMac lid authorization removed."
+            }
         } else {
-            lastError = "Could not remove lid authorization. \(cleanError(result))"
+            lastError = "Could not remove KeepAwakeMac's lid authorization. \(cleanError(result))"
         }
     }
 
     func refreshLidAuthorizationStatus() async {
+        // File existence identifies OUR authorization. `sudo -l` alone cannot:
+        // another app such as Amphetamine can grant the same pmset commands.
+        lidAuthorizationInstalled = FileManager.default.fileExists(atPath: sudoersPath)
+
         let one = await ShellRunner.run("/usr/bin/sudo", ["-n", "-l", "/usr/bin/pmset", "-a", "disablesleep", "1"])
         let zero = await ShellRunner.run("/usr/bin/sudo", ["-n", "-l", "/usr/bin/pmset", "-a", "disablesleep", "0"])
-        lidAuthorizationInstalled = one.succeeded && zero.succeeded
+        pmsetPrivilegeAvailable = one.succeeded && zero.succeeded
+
+        let warnings = [one.stderr, zero.stderr]
+            .joined(separator: "\n")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        sudoConfigurationWarning = warnings.localizedCaseInsensitiveContains("bad permissions") ? warnings : nil
     }
 
     func setLidClosedMode(_ enabled: Bool) async {
@@ -300,14 +298,15 @@ final class AwakeManager: ObservableObject {
         lastError = nil
 
         await refreshLidAuthorizationStatus()
-        guard lidAuthorizationInstalled else {
-            lastError = "Install Lid Authorization first."
+        guard pmsetPrivilegeAvailable else {
+            lastError = lidAuthorizationInstalled
+                ? "KeepAwakeMac's authorization exists, but sudo is not accepting the pmset command. Check the sudo configuration warning in Diagnostics."
+                : "Install Lid Authorization first."
             lidClosedModeEnabled = false
             return
         }
 
         await refreshSleepDisabledState()
-
         if enabled {
             if sleepDisabledReadback {
                 ownsSleepDisabled = UserDefaults.standard.bool(forKey: ownershipKey)
@@ -318,7 +317,7 @@ final class AwakeManager: ObservableObject {
             } else {
                 guard await setGlobalSleepDisabled(true) else {
                     lidClosedModeEnabled = false
-                    lastError = "macOS did not confirm SleepDisabled=1. Lid-closed mode was not armed."
+                    if lastError == nil { lastError = "macOS did not confirm SleepDisabled=1. Lid-closed mode was not armed." }
                     return
                 }
                 ownsSleepDisabled = true
@@ -343,10 +342,8 @@ final class AwakeManager: ObservableObject {
         let result = await ShellRunner.run("/usr/bin/pmset", ["-g", "batt"])
         let text = result.stdout
         onBatteryPower = text.localizedCaseInsensitiveContains("Battery Power")
-
         if let match = text.range(of: #"\b(\d{1,3})%"#, options: .regularExpression) {
-            let number = text[match].dropLast()
-            batteryPercent = Int(number)
+            batteryPercent = Int(text[match].dropLast())
         } else {
             batteryPercent = nil
         }
@@ -366,12 +363,14 @@ final class AwakeManager: ObservableObject {
         KeepAwakeMac diagnostics
         Version: \(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "unknown")
         Session active: \(isActive)
-        Lid authorization installed: \(lidAuthorizationInstalled)
+        KeepAwakeMac authorization file installed: \(lidAuthorizationInstalled)
+        pmset privilege available: \(pmsetPrivilegeAvailable)
         Lid mode enabled in app: \(lidClosedModeEnabled)
         App owns SleepDisabled: \(ownsSleepDisabled)
         SleepDisabled readback: \(sleepDisabledReadback)
         Battery: \(batteryPercent.map(String.init) ?? "unknown")% / on battery: \(onBatteryPower)
         Low battery cutoff: \(lowBatteryCutoff)%
+        Sudo configuration warning: \(sudoConfigurationWarning ?? "none")
 
         --- pmset -g ---
         \(settingsResult.stdout)
@@ -394,7 +393,6 @@ final class AwakeManager: ObservableObject {
             lastError = "pmset failed. \(cleanError(result))"
             return false
         }
-
         await refreshSleepDisabledState()
         return sleepDisabledReadback == enabled
     }
@@ -434,16 +432,13 @@ final class AwakeManager: ObservableObject {
     private func enforceLowBatterySafetyIfNeeded() async {
         guard lidClosedModeEnabled, ownsSleepDisabled, onBatteryPower, let batteryPercent else { return }
         guard batteryPercent <= max(5, lowBatteryCutoff) else { return }
-
-        lastError = "Lid-closed mode stopped at \(batteryPercent)% battery to avoid draining the Mac while sleep is disabled."
-        let error = lastError
+        let message = "Lid-closed mode stopped at \(batteryPercent)% battery to avoid draining the Mac while sleep is disabled."
         await stopAndRestoreSleep()
-        lastError = error
+        lastError = message
     }
 
     private func installWatchdog() {
         removeWatchdogToken()
-
         let cacheDirectory = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Caches/KeepAwakeMac", isDirectory: true)
         do {
@@ -455,10 +450,11 @@ final class AwakeManager: ObservableObject {
 
             heartbeatTimer?.invalidate()
             heartbeatTimer = Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in
-                guard let self, let path = self.watchdogTokenPath else { return }
-                try? FileManager.default.setAttributes([.modificationDate: Date()], ofItemAtPath: path)
+                Task { @MainActor in
+                    guard let self, let path = self.watchdogTokenPath else { return }
+                    try? FileManager.default.setAttributes([.modificationDate: Date()], ofItemAtPath: path)
+                }
             }
-
             ShellRunner.launchWatchdog(parentPID: getpid(), token: token, tokenPath: tokenPath.path)
         } catch {
             lastError = "Lid mode is active, but the crash watchdog could not be created: \(error.localizedDescription)"
@@ -468,9 +464,7 @@ final class AwakeManager: ObservableObject {
     private func removeWatchdogToken() {
         heartbeatTimer?.invalidate()
         heartbeatTimer = nil
-        if let watchdogTokenPath {
-            try? FileManager.default.removeItem(atPath: watchdogTokenPath)
-        }
+        if let watchdogTokenPath { try? FileManager.default.removeItem(atPath: watchdogTokenPath) }
         watchdogTokenPath = nil
     }
 
@@ -488,19 +482,13 @@ final class AwakeManager: ObservableObject {
             ProcessInfo.processInfo.endActivity(activityToken)
             self.activityToken = nil
         }
-
         rollbackAssertions()
         isActive = false
 
         if disarmLid, lidClosedModeEnabled || ownsSleepDisabled || UserDefaults.standard.bool(forKey: ownershipKey) {
-            Task { @MainActor [weak self] in
-                await self?.disableLidClosedModeIfOwned()
-            }
+            Task { @MainActor [weak self] in await self?.disableLidClosedModeIfOwned() }
         }
-
-        if clearError {
-            lastError = nil
-        }
+        if clearError { lastError = nil }
     }
 
     private func createAssertion(type: String, reason: String, id: inout IOPMAssertionID) -> IOReturn {
@@ -511,9 +499,7 @@ final class AwakeManager: ObservableObject {
             reason as NSString,
             &newID
         )
-        if result == kIOReturnSuccess {
-            id = newID
-        }
+        if result == kIOReturnSuccess { id = newID }
         return result
     }
 
@@ -531,24 +517,20 @@ final class AwakeManager: ObservableObject {
     }
 
     private func parseSleepDisabled(_ text: String) -> Bool {
-        let lines = text.components(separatedBy: .newlines)
-        for line in lines {
+        for line in text.components(separatedBy: .newlines) {
             let lower = line.lowercased()
             if lower.contains("sleepdisabled") || lower.contains("disablesleep") {
-                let parts = line.split(whereSeparator: { $0.isWhitespace })
-                if let last = parts.last {
-                    return last == "1"
-                }
+                if let last = line.split(whereSeparator: { $0.isWhitespace }).last { return last == "1" }
             }
         }
         return false
     }
 
     private func cleanError(_ result: ShellResult) -> String {
-        let text = result.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !text.isEmpty { return text }
-        let output = result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
-        return output.isEmpty ? "exit status \(result.status)" : output
+        let stderr = result.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !stderr.isEmpty { return stderr }
+        let stdout = result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        return stdout.isEmpty ? "exit status \(result.status)" : stdout
     }
 
     deinit {
@@ -556,10 +538,7 @@ final class AwakeManager: ObservableObject {
         ticker?.invalidate()
         safetyTimer?.invalidate()
         heartbeatTimer?.invalidate()
-
-        if let activityToken {
-            ProcessInfo.processInfo.endActivity(activityToken)
-        }
+        if let activityToken { ProcessInfo.processInfo.endActivity(activityToken) }
         if displayAssertionID != 0 { IOPMAssertionRelease(displayAssertionID) }
         if idleSystemAssertionID != 0 { IOPMAssertionRelease(idleSystemAssertionID) }
         if systemAssertionID != 0 { IOPMAssertionRelease(systemAssertionID) }
