@@ -164,7 +164,7 @@ struct AwakeMenuView: View {
                 if manager.lidClosedModeEnabled {
                     Text(manager.kernelLidGuardActive ? "Kernel guard ON" : "Kernel guard OFF")
                         .font(.caption.monospaced())
-                        .foregroundStyle(manager.kernelLidGuardActive ? .secondary : .red)
+                        .foregroundColor(manager.kernelLidGuardActive ? .secondary : .red)
                 } else if manager.sleepDisabledReadback {
                     Text("SleepDisabled = 1")
                         .font(.caption.monospaced())
