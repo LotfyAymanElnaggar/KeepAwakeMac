@@ -1,42 +1,45 @@
-# KeepAwakeMac v1.1.1
+# KeepAwakeMac v1.1.2
 
-This patch fixes the menu-bar pop-up on macOS 27 beta. In v1.1.0, SwiftUI could collapse the root `ScrollView` in `MenuBarExtra` window style into a thin horizontal strip because the popover only had a maximum height and no explicit content height.
+This patch fixes lid-authorization handling when another app has a broken file in `/etc/sudoers.d`.
+
+The issue was reproduced from diagnostics showing Amphetamine's `amphetamine_PowerProtect` fragment with incorrect permissions. KeepAwakeMac v1.1.1 performed a global `visudo -c` after installing or removing its own rule, so an unrelated third-party sudoers error could make KeepAwakeMac report that its own operation failed.
 
 ## Fixed
 
-- **Menu-bar pop-up sizing:** the window now opens at a stable 400 × 620 point content size.
-- The settings remain vertically scrollable when the full content does not fit.
-- The content stack explicitly fills the pop-up width instead of relying on the `ScrollView`'s ideal size.
+- **No global sudoers validation:** KeepAwakeMac now validates only its own `/etc/sudoers.d/keepawakemac` fragment with `visudo -cf`.
+- **Third-party sudoers errors no longer block removal:** removing KeepAwakeMac authorization deletes only its own file and does not fail because Amphetamine, or another app, has a malformed fragment.
+- **Correct authorization ownership:** the UI now treats "Lid Authorization installed" as the existence of KeepAwakeMac's own sudoers fragment, rather than inferring it from `sudo -l`. This prevents another app that grants similar `pmset` access from making KeepAwakeMac look installed after its file has already been removed.
+- **Separate privilege detection:** KeepAwakeMac still checks whether the exact two `pmset disablesleep` commands are actually executable without a password before arming lid mode.
+- **Foreign sudoers warnings captured in Diagnostics** instead of being mistaken for KeepAwakeMac installation/removal failures.
+- Keeps the v1.1.1 fixed 400 × 620 menu-bar pop-up sizing.
 
-## Lid-closed mode included
+## What the supplied diagnostics confirmed
 
-v1.1.1 retains the v1.1.0 lid-closed implementation:
+The normal keep-awake engine was active and working: macOS reported KeepAwakeMac-owned `PreventSystemSleep` and `PreventUserIdleSystemSleep` assertions and showed idle sleep as prevented. Lid mode itself was not armed because `SleepDisabled` read back as `0`.
 
-- `pmset -a disablesleep 1` for verified lid-closed operation in addition to normal IOKit keep-awake assertions.
-- One-time administrator authorization limited to exactly `pmset ... disablesleep 1` and `pmset ... disablesleep 0`.
-- Read-back verification through `pmset -g`; lid mode is only reported as armed when macOS reports `SleepDisabled = 1`.
-- Crash/heartbeat watchdog that attempts to restore `SleepDisabled = 0` if the app disappears while it owns the setting.
-- Configurable 10%, 15%, 20%, or 25% low-battery cutoff.
-- Copyable diagnostics for `pmset -g`, power assertions, battery state, and app state.
-- Universal DMG for Apple Silicon and Intel.
+For actual lid-closed operation, enable **Keep running with lid closed** and confirm the menu reports `SleepDisabled = 1` before closing the lid.
 
-## Important safety note
+## Amphetamine warning
 
-Lid-closed mode disables normal system sleep globally for the duration of the mode. Do not put the MacBook in a bag, sleeve, drawer, or other poorly ventilated place while it is armed.
+If Diagnostics reports:
 
-## macOS 27 beta
+```text
+/private/etc/sudoers.d/amphetamine_PowerProtect: bad permissions, should be mode 0440
+```
 
-This is a test build for current macOS versions including macOS 27 beta. `disablesleep` is a system power-management setting rather than a normal public app API, so behavior can change between beta builds or hardware revisions. KeepAwakeMac verifies the actual macOS read-back state rather than assuming success.
+that file belongs to Amphetamine, not KeepAwakeMac. v1.1.2 will no longer let that unrelated warning break KeepAwakeMac's own install/remove flow. You may still want to repair or remove the stale Amphetamine Power Protect authorization separately.
 
-## Recovery
+## Safety
 
-If normal sleep does not return after a test, run:
+Lid-closed mode disables normal system sleep globally while armed. Do not put the MacBook in a bag, sleeve, drawer, or other poorly ventilated location while `SleepDisabled = 1`.
+
+If normal sleep ever fails to return, restore it with:
 
 ```sh
 sudo pmset -a disablesleep 0
 ```
 
-Then verify:
+and verify with:
 
 ```sh
 pmset -g | grep -i SleepDisabled
