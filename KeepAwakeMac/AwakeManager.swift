@@ -9,7 +9,11 @@ final class AwakeManager: ObservableObject {
     @Published var allowDisplaySleep = true
     @Published var lastError: String?
 
-    private var assertionID: IOPMAssertionID = 0
+    private var systemAssertionID: IOPMAssertionID = 0
+    private var idleSystemAssertionID: IOPMAssertionID = 0
+    private var displayAssertionID: IOPMAssertionID = 0
+    private var activityToken: NSObjectProtocol?
+
     private var endTimer: Timer?
     private var ticker: Timer?
 
@@ -17,26 +21,65 @@ final class AwakeManager: ObservableObject {
         stop(clearError: false)
         lastError = nil
 
-        let assertionTypeString = allowDisplaySleep
-            ? kIOPMAssertionTypePreventUserIdleSystemSleep
-            : kIOPMAssertionTypeNoDisplaySleep
-        let assertionType = assertionTypeString as NSString
-        let reason = "KeepAwakeMac session enabled by user" as NSString
+        let reason = "KeepAwakeMac session enabled by user"
 
-        var newAssertionID: IOPMAssertionID = 0
-        let result = IOPMAssertionCreateWithName(
-            assertionType,
-            IOPMAssertionLevel(kIOPMAssertionLevelOn),
-            reason,
-            &newAssertionID
+        // Hold a PreventSystemSleep assertion in addition to the idle-sleep
+        // assertion. The former asks macOS to remain awake (or in Dark Wake)
+        // instead of entering full system sleep, while the latter explicitly
+        // blocks ordinary idle sleep.
+        let systemResult = createAssertion(
+            type: kIOPMAssertionTypePreventSystemSleep,
+            reason: reason,
+            id: &systemAssertionID
         )
 
-        guard result == kIOReturnSuccess else {
-            lastError = "Could not create a macOS power assertion (error \(result))."
+        guard systemResult == kIOReturnSuccess else {
+            rollbackAssertions()
+            lastError = "Could not create the system-sleep assertion (error \(systemResult))."
             return
         }
 
-        assertionID = newAssertionID
+        let idleResult = createAssertion(
+            type: kIOPMAssertionTypePreventUserIdleSystemSleep,
+            reason: reason,
+            id: &idleSystemAssertionID
+        )
+
+        guard idleResult == kIOReturnSuccess else {
+            rollbackAssertions()
+            lastError = "Could not create the idle-sleep assertion (error \(idleResult))."
+            return
+        }
+
+        if !allowDisplaySleep {
+            let displayResult = createAssertion(
+                type: kIOPMAssertionTypePreventUserIdleDisplaySleep,
+                reason: reason,
+                id: &displayAssertionID
+            )
+
+            guard displayResult == kIOReturnSuccess else {
+                rollbackAssertions()
+                lastError = "Could not create the display-sleep assertion (error \(displayResult))."
+                return
+            }
+        }
+
+        // Also use Foundation's activity API. This gives macOS a second,
+        // high-level signal that this is a user-requested activity which must
+        // not be interrupted by idle sleep.
+        var activityOptions: ProcessInfo.ActivityOptions = [
+            .userInitiated,
+            .idleSystemSleepDisabled
+        ]
+        if !allowDisplaySleep {
+            activityOptions.insert(.idleDisplaySleepDisabled)
+        }
+        activityToken = ProcessInfo.processInfo.beginActivity(
+            options: activityOptions,
+            reason: reason
+        )
+
         isActive = true
 
         if let duration {
@@ -83,20 +126,66 @@ final class AwakeManager: ObservableObject {
         endDate = nil
         remainingSeconds = nil
 
-        if assertionID != 0 {
-            IOPMAssertionRelease(assertionID)
-            assertionID = 0
+        if let activityToken {
+            ProcessInfo.processInfo.endActivity(activityToken)
+            self.activityToken = nil
         }
 
+        rollbackAssertions()
         isActive = false
-        if clearError { lastError = nil }
+
+        if clearError {
+            lastError = nil
+        }
+    }
+
+    private func createAssertion(
+        type: String,
+        reason: String,
+        id: inout IOPMAssertionID
+    ) -> IOReturn {
+        var newID: IOPMAssertionID = 0
+        let result = IOPMAssertionCreateWithName(
+            type as NSString,
+            IOPMAssertionLevel(kIOPMAssertionLevelOn),
+            reason as NSString,
+            &newID
+        )
+        if result == kIOReturnSuccess {
+            id = newID
+        }
+        return result
+    }
+
+    private func rollbackAssertions() {
+        releaseAssertion(&displayAssertionID)
+        releaseAssertion(&idleSystemAssertionID)
+        releaseAssertion(&systemAssertionID)
+    }
+
+    private func releaseAssertion(_ id: inout IOPMAssertionID) {
+        if id != 0 {
+            IOPMAssertionRelease(id)
+            id = 0
+        }
     }
 
     deinit {
         endTimer?.invalidate()
         ticker?.invalidate()
-        if assertionID != 0 {
-            IOPMAssertionRelease(assertionID)
+
+        if let activityToken {
+            ProcessInfo.processInfo.endActivity(activityToken)
+        }
+
+        if displayAssertionID != 0 {
+            IOPMAssertionRelease(displayAssertionID)
+        }
+        if idleSystemAssertionID != 0 {
+            IOPMAssertionRelease(idleSystemAssertionID)
+        }
+        if systemAssertionID != 0 {
+            IOPMAssertionRelease(systemAssertionID)
         }
     }
 }
