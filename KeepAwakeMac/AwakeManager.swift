@@ -27,11 +27,19 @@ private enum ShellRunner {
                 do {
                     try process.run()
                     process.waitUntilExit()
-                    let stdout = String(data: output.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-                    let stderr = String(data: error.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-                    continuation.resume(returning: ShellResult(status: process.terminationStatus, stdout: stdout, stderr: stderr))
+                    let outData = output.fileHandleForReading.readDataToEndOfFile()
+                    let errData = error.fileHandleForReading.readDataToEndOfFile()
+                    continuation.resume(returning: ShellResult(
+                        status: process.terminationStatus,
+                        stdout: String(data: outData, encoding: .utf8) ?? "",
+                        stderr: String(data: errData, encoding: .utf8) ?? ""
+                    ))
                 } catch {
-                    continuation.resume(returning: ShellResult(status: -1, stdout: "", stderr: error.localizedDescription))
+                    continuation.resume(returning: ShellResult(
+                        status: -1,
+                        stdout: "",
+                        stderr: error.localizedDescription
+                    ))
                 }
             }
         }
@@ -52,6 +60,8 @@ private let kPMSetClamshellSleepStateSelector: UInt32 = 12
 
 @MainActor
 final class AwakeManager: ObservableObject {
+    // MARK: Published state
+
     @Published private(set) var isActive = false
     @Published private(set) var endDate: Date?
     @Published private(set) var remainingSeconds: TimeInterval?
@@ -72,14 +82,15 @@ final class AwakeManager: ObservableObject {
     @Published private(set) var hasExternalDisplay = false
     @Published private(set) var displaySleepStatus: String?
 
-    // v1.3 kernel-level clamshell guard + backlight state.
     @Published private(set) var kernelLidGuardActive = false
     @Published private(set) var appleClamshellCausesSleep: Bool?
-    @Published private(set) var kernelSelectorStatus: String = "not armed"
+    @Published private(set) var kernelSelectorStatus = "not armed"
     @Published private(set) var backlightDimmed = false
     @Published private(set) var savedBacklightBrightness: Float?
     @Published private(set) var lastSleepVetoAt: Date?
     @Published private(set) var lastSystemWakeAt: Date?
+
+    // MARK: Persistent/system state
 
     private let ownershipKey = "KeepAwakeMac.ownsSleepDisabled"
     private let sudoersPath = "/etc/sudoers.d/keepawakemac"
@@ -116,6 +127,8 @@ final class AwakeManager: ObservableObject {
     private var wakeObserver: NSObjectProtocol?
     private var vetoObserver: NSObjectProtocol?
 
+    // MARK: Launch/session lifecycle
+
     func prepareOnLaunch() async {
         guard !prepared else { return }
         prepared = true
@@ -130,8 +143,8 @@ final class AwakeManager: ObservableObject {
         await refreshSleepDisabledState()
         await refreshBatteryState()
 
-        // Recover only state that KeepAwakeMac previously marked as its own.
-        // Do not disturb another utility's global pmset state.
+        // Recover only a global pmset state that this app explicitly marked as
+        // its own. Never turn off another utility's SleepDisabled setting.
         if UserDefaults.standard.bool(forKey: ownershipKey) {
             _ = setKernelClamshellSleepDisabled(false)
             if sleepDisabledReadback, pmsetPrivilegeAvailable {
@@ -155,19 +168,25 @@ final class AwakeManager: ObservableObject {
 
         let reason = "KeepAwakeMac session enabled by user"
         var options: ProcessInfo.ActivityOptions = [.userInitiated, .idleSystemSleepDisabled]
-        if !allowDisplaySleep { options.insert(.idleDisplaySleepDisabled) }
+        if !allowDisplaySleep {
+            options.insert(.idleDisplaySleepDisabled)
+        }
         activityToken = ProcessInfo.processInfo.beginActivity(options: options, reason: reason)
         systemPowerVeto.setEnabled(true)
         isActive = true
 
         if let duration {
             let safeDuration = max(1, duration)
-            endDate = Date().addingTimeInterval(safeDuration)
+            let deadline = Date().addingTimeInterval(safeDuration)
+            endDate = deadline
             remainingSeconds = safeDuration
 
             endTimer = Timer.scheduledTimer(withTimeInterval: safeDuration, repeats: false) { [weak self] _ in
-                Task { @MainActor in await self?.stopAndRestoreSleep() }
+                Task { @MainActor in
+                    await self?.stopAndRestoreSleep()
+                }
             }
+
             ticker = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
                 Task { @MainActor in
                     guard let self, let endDate = self.endDate else { return }
@@ -201,12 +220,18 @@ final class AwakeManager: ObservableObject {
     }
 
     func stopAndRestoreSleep() async {
-        let shouldDisarm = lidClosedModeEnabled || kernelLidGuardActive || ownsSleepDisabled || UserDefaults.standard.bool(forKey: ownershipKey)
+        let shouldDisarm = lidClosedModeEnabled
+            || kernelLidGuardActive
+            || ownsSleepDisabled
+            || UserDefaults.standard.bool(forKey: ownershipKey)
+
         stopCore(clearError: true, disarmLid: false)
-        if shouldDisarm { await disableLidClosedModeIfOwned() }
+        if shouldDisarm {
+            await disableLidClosedModeIfOwned()
+        }
     }
 
-    // MARK: - Authorization
+    // MARK: Lid authorization
 
     func installLidAuthorization() async {
         guard !lidChanging else { return }
@@ -245,7 +270,10 @@ final class AwakeManager: ObservableObject {
         lastError = nil
         lidStatusMessage = nil
 
-        if lidClosedModeEnabled || kernelLidGuardActive || ownsSleepDisabled || UserDefaults.standard.bool(forKey: ownershipKey) {
+        if lidClosedModeEnabled
+            || kernelLidGuardActive
+            || ownsSleepDisabled
+            || UserDefaults.standard.bool(forKey: ownershipKey) {
             await disableLidClosedModeIfOwned()
         }
 
@@ -274,7 +302,7 @@ final class AwakeManager: ObservableObject {
         sudoConfigurationWarning = warnings.localizedCaseInsensitiveContains("bad permissions") ? warnings : nil
     }
 
-    // MARK: - Lid mode
+    // MARK: Lid mode
 
     func setLidClosedMode(_ enabled: Bool) async {
         guard !lidChanging else { return }
@@ -338,7 +366,7 @@ final class AwakeManager: ObservableObject {
         if appleClamshellCausesSleep == false {
             lidStatusMessage = "Kernel lid guard active + SleepDisabled=1 verified."
         } else {
-            lidStatusMessage = "Kernel lid guard accepted (selector 12) + SleepDisabled=1. Clamshell policy is being re-applied continuously."
+            lidStatusMessage = "Kernel lid guard accepted (selector 12) + SleepDisabled=1. macOS 27 lid policy is being re-applied continuously."
         }
     }
 
@@ -351,6 +379,7 @@ final class AwakeManager: ObservableObject {
         let result = await ShellRunner.run("/usr/bin/pmset", ["-g", "batt"])
         let text = result.stdout
         onBatteryPower = text.localizedCaseInsensitiveContains("Battery Power")
+
         if let match = text.range(of: #"\b(\d{1,3})%"#, options: .regularExpression) {
             batteryPercent = Int(text[match].dropLast())
         } else {
@@ -358,12 +387,15 @@ final class AwakeManager: ObservableObject {
         }
     }
 
-    // MARK: - Kernel clamshell override
+    // MARK: Kernel clamshell override
 
     private func ensureRootDomainConnection() -> Bool {
         if rootDomainConnection != 0 { return true }
 
-        rootDomainService = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("IOPMrootDomain"))
+        rootDomainService = IOServiceGetMatchingService(
+            kIOMainPortDefault,
+            IOServiceMatching("IOPMrootDomain")
+        )
         guard rootDomainService != 0 else {
             kernelSelectorStatus = "IOPMrootDomain unavailable"
             return false
@@ -422,29 +454,40 @@ final class AwakeManager: ObservableObject {
     }
 
     private func refreshRootDomainState() {
-        lidIsClosed = readRootDomainBoolProperty("AppleClamshellState") ?? lidIsClosed
+        if let state = readRootDomainBoolProperty("AppleClamshellState") {
+            lidIsClosed = state
+        }
         appleClamshellCausesSleep = readRootDomainBoolProperty("AppleClamshellCausesSleep")
     }
 
     private func readRootDomainBoolProperty(_ key: String) -> Bool? {
         let service: io_service_t
         let shouldRelease: Bool
+
         if rootDomainService != 0 {
             service = rootDomainService
             shouldRelease = false
         } else {
-            service = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("IOPMrootDomain"))
+            service = IOServiceGetMatchingService(
+                kIOMainPortDefault,
+                IOServiceMatching("IOPMrootDomain")
+            )
             shouldRelease = true
         }
+
         guard service != 0 else { return nil }
-        defer { if shouldRelease { IOObjectRelease(service) } }
+        defer {
+            if shouldRelease { IOObjectRelease(service) }
+        }
 
         guard let value = IORegistryEntryCreateCFProperty(
             service,
             key as CFString,
             kCFAllocatorDefault,
             0
-        )?.takeRetainedValue() else { return nil }
+        )?.takeRetainedValue() else {
+            return nil
+        }
 
         if let bool = value as? Bool { return bool }
         if let number = value as? NSNumber { return number.boolValue }
@@ -467,7 +510,7 @@ final class AwakeManager: ObservableObject {
         kernelHeartbeatTimer = nil
     }
 
-    // MARK: - Physical lid + backlight
+    // MARK: Physical lid + backlight
 
     private func startLidMonitor() {
         lidMonitorTimer?.invalidate()
@@ -485,35 +528,43 @@ final class AwakeManager: ObservableObject {
     }
 
     private func refreshLidAndDisplayState(forceBacklightAction: Bool) {
-        let previousClosed = lidIsClosed
+        let wasClosed = lidIsClosed
         refreshRootDomainState()
         hasExternalDisplay = detectExternalDisplay()
 
-        let changedToClosed = lidIsClosed && !previousClosed
-        let changedToOpen = !lidIsClosed && previousClosed
+        let changedToClosed = lidIsClosed && !wasClosed
+        let changedToOpen = !lidIsClosed && wasClosed
 
         if lidClosedModeEnabled, changedToClosed {
-            // Re-assert immediately on the physical edge, in addition to the
-            // periodic heartbeat and pmset layer.
+            // Re-assert immediately on the physical edge in addition to the
+            // periodic heartbeat and the pmset layer.
             _ = setKernelClamshellSleepDisabled(true)
         }
 
         if changedToOpen || !lidIsClosed {
-            if backlightDimmed { restoreBuiltinBacklight() }
-            if !lidIsClosed { displaySleepStatus = nil }
+            if backlightDimmed {
+                restoreBuiltinBacklight()
+            }
+            if !lidIsClosed {
+                displaySleepStatus = nil
+            }
             return
         }
 
         guard lidClosedModeEnabled else { return }
 
         if hasExternalDisplay {
-            if backlightDimmed { restoreBuiltinBacklight() }
+            if backlightDimmed {
+                restoreBuiltinBacklight()
+            }
             displaySleepStatus = "Lid closed · external display detected; backlight override skipped."
             return
         }
 
         guard allowDisplaySleep else {
-            if backlightDimmed { restoreBuiltinBacklight() }
+            if backlightDimmed {
+                restoreBuiltinBacklight()
+            }
             displaySleepStatus = "Lid closed · display brightness left unchanged by preference."
             return
         }
@@ -525,11 +576,13 @@ final class AwakeManager: ObservableObject {
 
     private func loadDisplayServices() {
         guard dsGetBrightness == nil || dsSetBrightness == nil else { return }
+
         let path = "/System/Library/PrivateFrameworks/DisplayServices.framework/DisplayServices"
         guard let handle = dlopen(path, RTLD_LAZY) else {
             displaySleepStatus = "Backlight API unavailable on this macOS build."
             return
         }
+
         guard let getSymbol = dlsym(handle, "DisplayServicesGetBrightness"),
               let setSymbol = dlsym(handle, "DisplayServicesSetBrightness") else {
             dlclose(handle)
@@ -543,22 +596,28 @@ final class AwakeManager: ObservableObject {
     }
 
     private func findBuiltinDisplay() {
-        guard builtinDisplayID == nil else { return }
+        if builtinDisplayID != nil { return }
+
         var count: UInt32 = 0
         guard CGGetActiveDisplayList(0, nil, &count) == .success, count > 0 else { return }
+
         var displays = [CGDirectDisplayID](repeating: 0, count: Int(count))
         guard CGGetActiveDisplayList(count, &displays, &count) == .success else { return }
-        builtinDisplayID = displays.prefix(Int(count)).first(where: { CGDisplayIsBuiltin($0) != 0 })
+
+        builtinDisplayID = displays
+            .prefix(Int(count))
+            .first(where: { CGDisplayIsBuiltin($0) != 0 })
     }
 
     private func dimBuiltinBacklight() {
         loadDisplayServices()
         findBuiltinDisplay()
+
         guard !backlightDimmed,
               let id = builtinDisplayID,
               let getBrightness = dsGetBrightness,
               let setBrightness = dsSetBrightness else {
-            displaySleepStatus = "Lid closed · backlight control unavailable; display sleep was not forced so macOS will not be deliberately locked by this app."
+            displaySleepStatus = "Lid closed · backlight control unavailable; KeepAwakeMac did not force display sleep or lock."
             return
         }
 
@@ -568,66 +627,83 @@ final class AwakeManager: ObservableObject {
             return
         }
 
-        let clamped = max(0.0, min(1.0, current))
+        let clamped = max(0, min(1, current))
         savedBacklightBrightness = clamped
         if let path = watchdogBrightnessPath {
             try? "\(clamped)\n".write(toFile: path, atomically: true, encoding: .utf8)
         }
 
-        let result = setBrightness(id, 0.0)
+        let result = setBrightness(id, 0)
         if result == 0 {
             backlightDimmed = true
-            displaySleepStatus = "Lid closed · built-in backlight set to 0 without starting display sleep/lock."
+            displaySleepStatus = "Lid closed · built-in backlight set to 0 without deliberately starting display sleep/lock."
         } else {
             savedBacklightBrightness = nil
-            if let path = watchdogBrightnessPath { try? FileManager.default.removeItem(atPath: path) }
+            if let path = watchdogBrightnessPath {
+                try? FileManager.default.removeItem(atPath: path)
+            }
             displaySleepStatus = "Lid closed · macOS rejected the backlight request (\(result))."
         }
     }
 
     private func restoreBuiltinBacklight() {
         guard backlightDimmed else { return }
+
         loadDisplayServices()
         findBuiltinDisplay()
 
         var target = savedBacklightBrightness
-        if target == nil, let path = watchdogBrightnessPath,
+        if target == nil,
+           let path = watchdogBrightnessPath,
            let raw = try? String(contentsOfFile: path, encoding: .utf8) {
             target = Float(raw.trimmingCharacters(in: .whitespacesAndNewlines))
         }
 
-        if let id = builtinDisplayID, let setBrightness = dsSetBrightness, let target {
-            _ = setBrightness(id, max(0.05, min(1.0, target)))
+        if let id = builtinDisplayID,
+           let setBrightness = dsSetBrightness,
+           let target {
+            _ = setBrightness(id, max(0.05, min(1, target)))
         }
 
         backlightDimmed = false
         savedBacklightBrightness = nil
-        if let path = watchdogBrightnessPath { try? FileManager.default.removeItem(atPath: path) }
+        if let path = watchdogBrightnessPath {
+            try? FileManager.default.removeItem(atPath: path)
+        }
     }
 
     private func detectExternalDisplay() -> Bool {
         var count: UInt32 = 0
         guard CGGetOnlineDisplayList(0, nil, &count) == .success, count > 0 else { return false }
+
         var displays = [CGDirectDisplayID](repeating: 0, count: Int(count))
         guard CGGetOnlineDisplayList(count, &displays, &count) == .success else { return false }
-        return displays.prefix(Int(count)).contains(where: { CGDisplayIsBuiltin($0) == 0 })
+
+        return displays
+            .prefix(Int(count))
+            .contains(where: { CGDisplayIsBuiltin($0) == 0 })
     }
 
-    // MARK: - Crash watchdog
+    // MARK: Crash watchdog
 
     private func installWatchdog() {
         removeWatchdogToken()
 
         let cacheDirectory = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Caches/KeepAwakeMac", isDirectory: true)
+
         do {
-            try FileManager.default.createDirectory(at: cacheDirectory, withIntermediateDirectories: true)
+            try FileManager.default.createDirectory(
+                at: cacheDirectory,
+                withIntermediateDirectories: true
+            )
+
             let tokenURL = cacheDirectory.appendingPathComponent("lid-watchdog.token")
             let brightnessURL = cacheDirectory.appendingPathComponent("lid-watchdog.brightness")
             let token = UUID().uuidString
+
             try token.write(to: tokenURL, atomically: true, encoding: .utf8)
             try? FileManager.default.removeItem(at: brightnessURL)
-
             watchdogTokenPath = tokenURL.path
             watchdogBrightnessPath = brightnessURL.path
 
@@ -635,6 +711,7 @@ final class AwakeManager: ObservableObject {
                 lastError = "Kernel lid mode is active, but the watchdog executable directory could not be located."
                 return
             }
+
             let helperURL = executableDirectory.appendingPathComponent("KeepAwakeLidWatchdog")
             guard FileManager.default.isExecutableFile(atPath: helperURL.path) else {
                 lastError = "Kernel lid mode is active, but KeepAwakeLidWatchdog is missing from this build."
@@ -663,16 +740,21 @@ final class AwakeManager: ObservableObject {
 
     private func touchWatchdogToken() {
         guard let path = watchdogTokenPath else { return }
-        try? FileManager.default.setAttributes([.modificationDate: Date()], ofItemAtPath: path)
+        try? FileManager.default.setAttributes(
+            [.modificationDate: Date()],
+            ofItemAtPath: path
+        )
     }
 
     private func removeWatchdogToken() {
-        if let path = watchdogTokenPath { try? FileManager.default.removeItem(atPath: path) }
+        if let path = watchdogTokenPath {
+            try? FileManager.default.removeItem(atPath: path)
+        }
         watchdogTokenPath = nil
         watchdogProcess = nil
     }
 
-    // MARK: - Safety + system power events
+    // MARK: System power events + safety
 
     private func installPowerNotifications() {
         guard wakeObserver == nil, vetoObserver == nil else { return }
@@ -685,15 +767,14 @@ final class AwakeManager: ObservableObject {
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 self.lastSystemWakeAt = Date()
-                guard self.isActive else { return }
-                if self.lidClosedModeEnabled {
-                    _ = self.setKernelClamshellSleepDisabled(true)
-                    await self.refreshSleepDisabledState()
-                    if self.ownsSleepDisabled && !self.sleepDisabledReadback {
-                        _ = await self.setGlobalSleepDisabled(true)
-                    }
-                    self.refreshLidAndDisplayState(forceBacklightAction: true)
+                guard self.isActive, self.lidClosedModeEnabled else { return }
+
+                _ = self.setKernelClamshellSleepDisabled(true)
+                await self.refreshSleepDisabledState()
+                if self.ownsSleepDisabled && !self.sleepDisabledReadback {
+                    _ = await self.setGlobalSleepDisabled(true)
                 }
+                self.refreshLidAndDisplayState(forceBacklightAction: true)
             }
         }
 
@@ -713,6 +794,7 @@ final class AwakeManager: ObservableObject {
         safetyTimer = Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 guard let self else { return }
+
                 await self.refreshBatteryState()
                 await self.refreshSleepDisabledState()
 
@@ -723,14 +805,20 @@ final class AwakeManager: ObservableObject {
                     }
                     self.refreshLidAndDisplayState(forceBacklightAction: false)
                 }
+
                 await self.enforceLowBatterySafetyIfNeeded()
             }
         }
     }
 
     private func enforceLowBatterySafetyIfNeeded() async {
-        guard lidClosedModeEnabled, ownsSleepDisabled, onBatteryPower, let batteryPercent else { return }
+        guard lidClosedModeEnabled,
+              ownsSleepDisabled,
+              onBatteryPower,
+              let batteryPercent else { return }
+
         guard batteryPercent <= max(5, lowBatteryCutoff) else { return }
+
         let message = "Lid-closed mode stopped at \(batteryPercent)% battery to avoid draining the Mac while system sleep is disabled."
         await stopAndRestoreSleep()
         lastError = message
@@ -738,23 +826,31 @@ final class AwakeManager: ObservableObject {
 
     private func setGlobalSleepDisabled(_ enabled: Bool) async -> Bool {
         let value = enabled ? "1" : "0"
-        let result = await ShellRunner.run("/usr/bin/sudo", ["-n", "/usr/bin/pmset", "-a", "disablesleep", value])
+        let result = await ShellRunner.run(
+            "/usr/bin/sudo",
+            ["-n", "/usr/bin/pmset", "-a", "disablesleep", value]
+        )
+
         guard result.succeeded else {
             lastError = "pmset failed. \(cleanError(result))"
             return false
         }
+
         await refreshSleepDisabledState()
         return sleepDisabledReadback == enabled
     }
 
     private func disableLidClosedModeIfOwned() async {
         lidClosedModeEnabled = false
+
+        // Signal the companion first. It will also restore on crash; normal
+        // shutdown does the same cleanup immediately here.
+        removeWatchdogToken()
         restoreBuiltinBacklight()
         _ = setKernelClamshellSleepDisabled(false)
         kernelLidGuardActive = false
         stopLidMonitor()
         stopKernelHeartbeat()
-        removeWatchdogToken()
 
         let markerOwned = UserDefaults.standard.bool(forKey: ownershipKey)
         if ownsSleepDisabled || markerOwned {
@@ -775,7 +871,7 @@ final class AwakeManager: ObservableObject {
         closeRootDomainConnection()
     }
 
-    // MARK: - Diagnostics
+    // MARK: Diagnostics
 
     func diagnostics() async -> String {
         await refreshLidAuthorizationStatus()
@@ -787,13 +883,50 @@ final class AwakeManager: ObservableObject {
         async let settings = ShellRunner.run("/usr/bin/pmset", ["-g"])
         async let assertions = ShellRunner.run("/usr/bin/pmset", ["-g", "assertions"])
         async let battery = ShellRunner.run("/usr/bin/pmset", ["-g", "batt"])
-        async let clamshell = ShellRunner.run("/usr/sbin/ioreg", ["-r", "-k", "AppleClamshellState", "-d", "4"])
-        async let sleepLog = ShellRunner.run("/bin/sh", ["-c", "/usr/bin/pmset -g log | /usr/bin/tail -n 80"])
-        let (settingsResult, assertionsResult, batteryResult, clamshellResult, sleepLogResult) = await (settings, assertions, battery, clamshell, sleepLog)
+        async let clamshell = ShellRunner.run(
+            "/usr/sbin/ioreg",
+            ["-r", "-k", "AppleClamshellState", "-d", "4"]
+        )
+        async let sleepLog = ShellRunner.run(
+            "/bin/sh",
+            ["-c", "/usr/bin/pmset -g log | /usr/bin/tail -n 80"]
+        )
+
+        let (settingsResult, assertionsResult, batteryResult, clamshellResult, sleepLogResult) = await (
+            settings,
+            assertions,
+            battery,
+            clamshell,
+            sleepLog
+        )
+
+        let versionText: String = Bundle.main.object(
+            forInfoDictionaryKey: "CFBundleShortVersionString"
+        ) as? String ?? "unknown"
+
+        let clamshellCausesSleepText: String
+        if let causesSleep = appleClamshellCausesSleep {
+            clamshellCausesSleepText = causesSleep ? "true" : "false"
+        } else {
+            clamshellCausesSleepText = "unknown"
+        }
+
+        let brightnessText: String
+        if let brightness = savedBacklightBrightness {
+            brightnessText = String(format: "%.3f", Double(brightness))
+        } else {
+            brightnessText = "none"
+        }
+
+        let batteryText: String = batteryPercent.map { String($0) } ?? "unknown"
+        let selectorCode = UInt32(bitPattern: lastKernelSelectorResult)
+        let selectorReturnText = String(format: "0x%08x", selectorCode)
+        let displayStatusText: String = displaySleepStatus ?? "none"
+        let sudoWarningText: String = sudoConfigurationWarning ?? "none"
 
         return """
         KeepAwakeMac diagnostics
-        Version: \(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "unknown")
+        Version: \(versionText)
         Session active: \(isActive)
         KeepAwakeMac authorization file installed: \(lidAuthorizationInstalled)
         pmset privilege available: \(pmsetPrivilegeAvailable)
@@ -802,19 +935,19 @@ final class AwakeManager: ObservableObject {
         External display detected: \(hasExternalDisplay)
         Kernel lid guard active: \(kernelLidGuardActive)
         Kernel selector status: \(kernelSelectorStatus)
-        Kernel selector return: 0x\(String(UInt32(bitPattern: lastKernelSelectorResult), radix: 16))
-        AppleClamshellCausesSleep readback: \(appleClamshellCausesSleep.map(String.init) ?? "unknown")
+        Kernel selector return: \(selectorReturnText)
+        AppleClamshellCausesSleep readback: \(clamshellCausesSleepText)
         Display/backlight preference: \(allowDisplaySleep)
         Backlight dimmed by app: \(backlightDimmed)
-        Saved backlight brightness: \(savedBacklightBrightness.map(String.init) ?? "none")
-        Display/backlight status: \(displaySleepStatus ?? "none")
+        Saved backlight brightness: \(brightnessText)
+        Display/backlight status: \(displayStatusText)
         Last idle-sleep veto: \(timestamp(lastSleepVetoAt))
         Last system wake notification: \(timestamp(lastSystemWakeAt))
         App owns SleepDisabled: \(ownsSleepDisabled)
         SleepDisabled readback: \(sleepDisabledReadback)
-        Battery: \(batteryPercent.map(String.init) ?? "unknown")% / on battery: \(onBatteryPower)
+        Battery: \(batteryText)% / on battery: \(onBatteryPower)
         Low battery cutoff: \(lowBatteryCutoff)%
-        Sudo configuration warning: \(sudoConfigurationWarning ?? "none")
+        Sudo configuration warning: \(sudoWarningText)
 
         --- pmset -g ---
         \(settingsResult.stdout)
@@ -843,19 +976,27 @@ final class AwakeManager: ObservableObject {
         return ISO8601DateFormatter().string(from: date)
     }
 
-    // MARK: - Core assertion lifecycle
+    // MARK: Core assertion lifecycle
 
     private func acquirePowerAssertions() -> Bool {
         rollbackAssertions()
         let reason = "KeepAwakeMac session enabled by user"
 
-        let systemResult = createAssertion(type: kIOPMAssertionTypePreventSystemSleep, reason: reason, id: &systemAssertionID)
+        let systemResult = createAssertion(
+            type: kIOPMAssertionTypePreventSystemSleep,
+            reason: reason,
+            id: &systemAssertionID
+        )
         guard systemResult == kIOReturnSuccess else {
             lastError = "Could not create the system-sleep assertion (error \(systemResult))."
             return false
         }
 
-        let idleResult = createAssertion(type: kIOPMAssertionTypePreventUserIdleSystemSleep, reason: reason, id: &idleSystemAssertionID)
+        let idleResult = createAssertion(
+            type: kIOPMAssertionTypePreventUserIdleSystemSleep,
+            reason: reason,
+            id: &idleSystemAssertionID
+        )
         guard idleResult == kIOReturnSuccess else {
             rollbackAssertions()
             lastError = "Could not create the idle-sleep assertion (error \(idleResult))."
@@ -863,13 +1004,18 @@ final class AwakeManager: ObservableObject {
         }
 
         if !allowDisplaySleep {
-            let displayResult = createAssertion(type: kIOPMAssertionTypePreventUserIdleDisplaySleep, reason: reason, id: &displayAssertionID)
+            let displayResult = createAssertion(
+                type: kIOPMAssertionTypePreventUserIdleDisplaySleep,
+                reason: reason,
+                id: &displayAssertionID
+            )
             guard displayResult == kIOReturnSuccess else {
                 rollbackAssertions()
                 lastError = "Could not create the display-sleep assertion (error \(displayResult))."
                 return false
             }
         }
+
         return true
     }
 
@@ -887,20 +1033,32 @@ final class AwakeManager: ObservableObject {
             ProcessInfo.processInfo.endActivity(activityToken)
             self.activityToken = nil
         }
+
         systemPowerVeto.setEnabled(false)
         rollbackAssertions()
         isActive = false
 
-        if disarmLid, lidClosedModeEnabled || kernelLidGuardActive || ownsSleepDisabled || UserDefaults.standard.bool(forKey: ownershipKey) {
-            Task { @MainActor [weak self] in await self?.disableLidClosedModeIfOwned() }
+        if disarmLid,
+           lidClosedModeEnabled
+            || kernelLidGuardActive
+            || ownsSleepDisabled
+            || UserDefaults.standard.bool(forKey: ownershipKey) {
+            Task { @MainActor [weak self] in
+                await self?.disableLidClosedModeIfOwned()
+            }
         } else if !lidClosedModeEnabled {
             stopLidMonitor()
             stopKernelHeartbeat()
         }
+
         if clearError { lastError = nil }
     }
 
-    private func createAssertion(type: String, reason: String, id: inout IOPMAssertionID) -> IOReturn {
+    private func createAssertion(
+        type: String,
+        reason: String,
+        id: inout IOPMAssertionID
+    ) -> IOReturn {
         var newID: IOPMAssertionID = 0
         let result = IOPMAssertionCreateWithName(
             type as NSString,
@@ -908,7 +1066,9 @@ final class AwakeManager: ObservableObject {
             reason as NSString,
             &newID
         )
-        if result == kIOReturnSuccess { id = newID }
+        if result == kIOReturnSuccess {
+            id = newID
+        }
         return result
     }
 
@@ -929,7 +1089,9 @@ final class AwakeManager: ObservableObject {
         for line in text.components(separatedBy: .newlines) {
             let lower = line.lowercased()
             if lower.contains("sleepdisabled") || lower.contains("disablesleep") {
-                if let last = line.split(whereSeparator: { $0.isWhitespace }).last { return last == "1" }
+                if let last = line.split(whereSeparator: { $0.isWhitespace }).last {
+                    return last == "1"
+                }
             }
         }
         return false
@@ -938,6 +1100,7 @@ final class AwakeManager: ObservableObject {
     private func cleanError(_ result: ShellResult) -> String {
         let stderr = result.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
         if !stderr.isEmpty { return stderr }
+
         let stdout = result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
         return stdout.isEmpty ? "exit status \(result.status)" : stdout
     }
@@ -950,22 +1113,45 @@ final class AwakeManager: ObservableObject {
         kernelHeartbeatTimer?.invalidate()
         systemPowerVeto.setEnabled(false)
 
-        if let wakeObserver { NotificationCenter.default.removeObserver(wakeObserver) }
-        if let vetoObserver { NotificationCenter.default.removeObserver(vetoObserver) }
+        if let wakeObserver {
+            NotificationCenter.default.removeObserver(wakeObserver)
+        }
+        if let vetoObserver {
+            NotificationCenter.default.removeObserver(vetoObserver)
+        }
 
-        if let activityToken { ProcessInfo.processInfo.endActivity(activityToken) }
-        if displayAssertionID != 0 { IOPMAssertionRelease(displayAssertionID) }
-        if idleSystemAssertionID != 0 { IOPMAssertionRelease(idleSystemAssertionID) }
-        if systemAssertionID != 0 { IOPMAssertionRelease(systemAssertionID) }
+        if let activityToken {
+            ProcessInfo.processInfo.endActivity(activityToken)
+        }
+        if displayAssertionID != 0 {
+            IOPMAssertionRelease(displayAssertionID)
+        }
+        if idleSystemAssertionID != 0 {
+            IOPMAssertionRelease(idleSystemAssertionID)
+        }
+        if systemAssertionID != 0 {
+            IOPMAssertionRelease(systemAssertionID)
+        }
 
-        // Normal termination should use stopAndRestoreSleep(). These direct calls
-        // are a last in-process cleanup layer; the companion watchdog covers crash.
+        // Last in-process kernel cleanup. Normal termination uses the async
+        // stop path; the bundled companion watchdog covers abrupt crashes.
         if rootDomainConnection != 0 {
             var input: UInt64 = 0
-            _ = IOConnectCallScalarMethod(rootDomainConnection, kPMSetClamshellSleepStateSelector, &input, 1, nil, nil)
+            _ = IOConnectCallScalarMethod(
+                rootDomainConnection,
+                kPMSetClamshellSleepStateSelector,
+                &input,
+                1,
+                nil,
+                nil
+            )
             IOServiceClose(rootDomainConnection)
         }
-        if rootDomainService != 0 { IOObjectRelease(rootDomainService) }
-        if let handle = displayServicesHandle { dlclose(handle) }
+        if rootDomainService != 0 {
+            IOObjectRelease(rootDomainService)
+        }
+        if let handle = displayServicesHandle {
+            dlclose(handle)
+        }
     }
 }
