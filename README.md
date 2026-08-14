@@ -16,16 +16,19 @@ The downloadable DMG is a universal build for Apple Silicon and Intel Macs.
 - Keep-awake sessions for 15 minutes, 30 minutes, 1 hour, 2 hours, custom time, or indefinitely
 - Let the display turn off while the Mac itself remains awake
 - Optional MacBook lid-closed mode
+- **Automatic display sleep on physical lid close** when `Allow display to turn off` is enabled
+- Detects external displays and does not force display sleep when one is connected
+- Re-issues display sleep while the lid remains closed if macOS wakes the panel unexpectedly
 - Runtime verification that macOS reports `SleepDisabled = 1` before lid mode is considered armed
 - One-time, narrowly scoped administrator authorization
 - Automatic cleanup when a session ends or the app quits
 - Crash/heartbeat watchdog that attempts to restore normal sleep if the app disappears while it owns `SleepDisabled`
 - Configurable low-battery safety cutoff (10%, 15%, 20%, or 25%)
-- Copyable `pmset` diagnostics for troubleshooting
+- Copyable `pmset` + clamshell diagnostics for troubleshooting
 
 ## Why lid-closed mode is different
 
-Normal macOS power assertions (the same family used by `caffeinate`) prevent ordinary idle sleep, but lid closure is a separate system sleep request. For lid-closed mode, KeepAwakeMac additionally uses the system-wide power-management setting:
+Normal macOS power assertions prevent ordinary idle sleep, but lid closure is a separate system sleep request. For lid-closed mode, KeepAwakeMac additionally uses the system-wide power-management setting:
 
 ```sh
 pmset -a disablesleep 1
@@ -39,9 +42,21 @@ pmset -a disablesleep 0
 
 `disablesleep` is not a normal public app API, so behavior can vary by Mac model and macOS release, especially beta releases. KeepAwakeMac does not assume the command succeeded: it reads `pmset -g` back and only reports lid mode as armed when `SleepDisabled` is actually enabled.
 
+## Keeping the Mac awake without wasting power on the closed screen
+
+Disabling lid sleep can leave the built-in panel awake on some macOS/hardware combinations. When **Allow display to turn off** is enabled, KeepAwakeMac watches the physical `AppleClamshellState` and, when the lid closes, requests display-only sleep with:
+
+```sh
+pmset displaysleepnow
+```
+
+That command sleeps the display while `SleepDisabled=1` keeps the computer itself running. KeepAwakeMac checks the lid once per second and re-issues the display-sleep request periodically while the lid remains closed, which handles macOS waking the panel unexpectedly.
+
+Before doing this, KeepAwakeMac checks the connected displays through Core Graphics. If an external display is online, it does not force `displaysleepnow`, because that command sleeps all active displays rather than only the built-in panel.
+
 ## One-time administrator authorization
 
-`pmset -a ...` requires administrator privileges. KeepAwakeMac can install a sudoers rule at:
+`pmset -a disablesleep ...` requires administrator privileges. KeepAwakeMac can install a sudoers rule at:
 
 ```text
 /etc/sudoers.d/keepawakemac
@@ -54,21 +69,25 @@ The rule is intentionally limited to exactly these two commands:
 /usr/bin/pmset -a disablesleep 0
 ```
 
-It does **not** grant the app unrestricted sudo access. The app validates the sudoers file with `visudo` before installing it. You can remove the authorization from the app at any time.
+`pmset displaysleepnow` is invoked separately for display-only sleep and does not widen this sudo rule.
+
+It does **not** grant the app unrestricted sudo access. The app validates only its own sudoers fragment with `visudo` before installing it. You can remove the authorization from the app at any time.
 
 See [SECURITY.md](SECURITY.md) for the exact security model.
 
 ## How to test lid-closed mode
 
 1. Install and launch KeepAwakeMac.
-2. Start a Keep Awake session.
-3. Under **MacBook lid**, click **Install Lid Authorization…** and approve the one-time administrator prompt.
-4. Enable **Keep running with lid closed**.
-5. Confirm the menu shows `SleepDisabled = 1`.
-6. Close the lid and test the workload you need to keep running.
-7. Reopen the lid and turn the session off when finished.
+2. Keep **Allow display to turn off** enabled.
+3. Start a Keep Awake session.
+4. Under **MacBook lid**, click **Install Lid Authorization…** and approve the one-time administrator prompt.
+5. Enable **Keep running with lid closed**.
+6. Confirm the menu shows `SleepDisabled = 1`.
+7. Close the lid.
+8. Verify your workload continues remotely while the built-in screen goes dark.
+9. Reopen the lid and turn the session off when finished.
 
-For a simple test, start a long-running network transfer, local server, timer, or SSH session before closing the lid and verify it continues from another device.
+The app now reports physical lid state, external-display detection, and the last display-sleep action in **Copy Diagnostics**.
 
 ## Display-off versus lock-screen behavior
 
@@ -82,12 +101,13 @@ KeepAwakeMac provides a shortcut to that settings page, but it deliberately does
 
 ## Safety
 
-**Do not use lid-closed mode while the MacBook is in a bag, sleeve, drawer, or other poorly ventilated space.** With system sleep disabled, background workloads can continue producing heat after the lid is closed.
+**Do not use lid-closed mode while the MacBook is in a bag, sleeve, drawer, or other poorly ventilated space.** With system sleep disabled, background workloads can continue producing heat after the lid is closed even though the screen is off.
 
 The app therefore includes:
 
 - a low-battery cutoff (15% by default),
 - timed sessions,
+- automatic display sleep on lid close,
 - a crash/heartbeat watchdog,
 - read-back verification of `SleepDisabled`, and
 - automatic restoration of normal sleep when a session stops.
@@ -116,13 +136,14 @@ Useful diagnostics:
 pmset -g
 pmset -g assertions
 pmset -g batt
+ioreg -r -k AppleClamshellState -d 4
 ```
 
 The app's **Copy Diagnostics** button collects the same information without including your password.
 
 ## macOS 27 beta
 
-KeepAwakeMac v1.1.0 is designed to test the `SleepDisabled` approach on current macOS releases, including macOS 27 beta. Because macOS 27 is pre-release software, lid behavior may still vary with hardware, firmware, battery state, thermal state, and beta changes. The in-app read-back check makes failures visible instead of silently pretending lid mode is active.
+KeepAwakeMac is being tested against macOS 27 beta. Because macOS 27 is pre-release software, lid and display behavior may vary with hardware, firmware, battery state, thermal state, and beta changes. The app verifies `SleepDisabled`, reports the physical clamshell state, and reports whether the display-sleep request was issued rather than silently assuming success.
 
 ## Build from source
 
