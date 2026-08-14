@@ -1,45 +1,91 @@
-# KeepAwakeMac v1.1.2
+# KeepAwakeMac v1.2.0
 
-This patch fixes lid-authorization handling when another app has a broken file in `/etc/sudoers.d`.
+This release solves the next macOS 27 closed-lid problem observed in real testing: the Mac successfully stayed awake with `SleepDisabled = 1`, but the built-in display could remain illuminated behind the closed lid and waste battery.
 
-The issue was reproduced from diagnostics showing Amphetamine's `amphetamine_PowerProtect` fragment with incorrect permissions. KeepAwakeMac v1.1.1 performed a global `visudo -c` after installing or removing its own rule, so an unrelated third-party sudoers error could make KeepAwakeMac report that its own operation failed.
+## New: closed-lid display power management
 
-## Fixed
+KeepAwakeMac now treats **computer sleep** and **display sleep** as two separate jobs.
 
-- **No global sudoers validation:** KeepAwakeMac now validates only its own `/etc/sudoers.d/keepawakemac` fragment with `visudo -cf`.
-- **Third-party sudoers errors no longer block removal:** removing KeepAwakeMac authorization deletes only its own file and does not fail because Amphetamine, or another app, has a malformed fragment.
-- **Correct authorization ownership:** the UI now treats "Lid Authorization installed" as the existence of KeepAwakeMac's own sudoers fragment, rather than inferring it from `sudo -l`. This prevents another app that grants similar `pmset` access from making KeepAwakeMac look installed after its file has already been removed.
-- **Separate privilege detection:** KeepAwakeMac still checks whether the exact two `pmset disablesleep` commands are actually executable without a password before arming lid mode.
-- **Foreign sudoers warnings captured in Diagnostics** instead of being mistaken for KeepAwakeMac installation/removal failures.
-- Keeps the v1.1.1 fixed 400 × 620 menu-bar pop-up sizing.
+When all of these are true:
 
-## What the supplied diagnostics confirmed
+- a Keep Awake session is active,
+- **Keep running with lid closed** is enabled,
+- `SleepDisabled = 1` is verified,
+- **Allow display to turn off** is enabled,
+- the physical MacBook lid is closed, and
+- no external display is connected,
 
-The normal keep-awake engine was active and working: macOS reported KeepAwakeMac-owned `PreventSystemSleep` and `PreventUserIdleSystemSleep` assertions and showed idle sleep as prevented. Lid mode itself was not armed because `SleepDisabled` read back as `0`.
+KeepAwakeMac runs:
 
-For actual lid-closed operation, enable **Keep running with lid closed** and confirm the menu reports `SleepDisabled = 1` before closing the lid.
-
-## Amphetamine warning
-
-If Diagnostics reports:
-
-```text
-/private/etc/sudoers.d/amphetamine_PowerProtect: bad permissions, should be mode 0440
+```sh
+/usr/bin/pmset displaysleepnow
 ```
 
-that file belongs to Amphetamine, not KeepAwakeMac. v1.1.2 will no longer let that unrelated warning break KeepAwakeMac's own install/remove flow. You may still want to repair or remove the stale Amphetamine Power Protect authorization separately.
+This powers down the display while the computer continues running under lid-closed mode.
+
+## Physical lid detection
+
+The app now checks macOS's `AppleClamshellState` through `ioreg` once per second. The menu and Diagnostics report whether the physical lid is open or closed.
+
+On the open → closed transition, the display-sleep request is sent immediately. While the lid remains closed, KeepAwakeMac periodically sends the request again so a macOS/background event that wakes the panel does not leave it illuminated for the rest of the session.
+
+## External-display protection
+
+`pmset displaysleepnow` sleeps active displays rather than targeting only one display. To avoid blanking a monitor during a desktop/clamshell setup, KeepAwakeMac uses Core Graphics to check whether a non-built-in display is online.
+
+If an external display is detected, automatic lid-close display sleep is skipped and the status is shown in the menu and Diagnostics.
+
+## No new administrator privilege
+
+The existing sudo authorization remains limited to exactly:
+
+```text
+/usr/bin/pmset -a disablesleep 1
+/usr/bin/pmset -a disablesleep 0
+```
+
+Display-only sleep is requested separately with `pmset displaysleepnow`; the sudoers rule is not widened.
+
+## Diagnostics additions
+
+**Copy Diagnostics** now includes:
+
+- physical lid closed/open state,
+- external display detection,
+- display-sleep preference,
+- latest display-sleep action/status,
+- raw `AppleClamshellState` output,
+- existing `SleepDisabled`, assertion, battery, and sudo diagnostics.
+
+## What the v1.1.2 diagnostics proved
+
+The supplied test showed:
+
+- `SleepDisabled = 1`,
+- lid mode enabled,
+- KeepAwakeMac owned the sleep-disabled state,
+- normal sleep prevented,
+- the workload continued with the lid closed.
+
+That means the lid-awake mechanism was working. v1.2.0 specifically addresses the remaining illuminated-display/battery-drain problem.
+
+## Lock-screen note
+
+Display power and authentication remain separate macOS policies. `pmset displaysleepnow` may start the normal macOS display-off password timer. If you want reopening the lid not to require authentication, configure **System Settings > Lock Screen > Require password after screen saver begins or display is turned off** according to your security preference.
+
+KeepAwakeMac does not disable authentication or store your password.
 
 ## Safety
 
-Lid-closed mode disables normal system sleep globally while armed. Do not put the MacBook in a bag, sleeve, drawer, or other poorly ventilated location while `SleepDisabled = 1`.
+Even with the screen powered down, the CPU, networking and other hardware may continue running while the lid is closed. Do not put the MacBook in a bag, sleeve, drawer, or poorly ventilated location while `SleepDisabled = 1`.
 
-If normal sleep ever fails to return, restore it with:
+The low-battery cutoff remains active. If normal sleep ever fails to return, run:
 
 ```sh
 sudo pmset -a disablesleep 0
 ```
 
-and verify with:
+and verify:
 
 ```sh
 pmset -g | grep -i SleepDisabled
