@@ -9,8 +9,8 @@ import Darwin
 // - KeepAwakeMac v1.3 uses IOPMrootDomain selector 12 to set the kernel's
 //   clamshellSleepDisableMask. That state is not reference-counted per process.
 // - If the GUI app crashes, this watchdog notices the missing/stale heartbeat,
-//   restores the kernel clamshell policy, restores SleepDisabled through the
-//   existing narrowly-scoped sudo rule, and restores saved display brightness.
+//   restores the kernel clamshell policy, restores SleepDisabled when the app
+//   itself owned that setting, and restores saved display brightness.
 //
 // Arguments:
 //   1 parent PID
@@ -18,6 +18,7 @@ import Darwin
 //   3 heartbeat token contents
 //   4 saved brightness path
 //   5 built-in CGDirectDisplayID (0 when unavailable)
+//   6 app owns pmset SleepDisabled: 1 or 0
 
 private let kPMSetClamshellSleepStateSelector: UInt32 = 12
 private let staleHeartbeatSeconds: TimeInterval = 30
@@ -97,7 +98,7 @@ private func heartbeatIsValid(parentPID: pid_t, tokenPath: String, token: String
 struct LidWatchdog {
     static func main() {
         let args = CommandLine.arguments
-        guard args.count == 6,
+        guard args.count == 7,
               let parentPID = Int32(args[1]),
               let displayRaw = UInt32(args[5])
         else { exit(64) }
@@ -106,13 +107,14 @@ struct LidWatchdog {
         let token = args[3]
         let brightnessPath = args[4]
         let displayID = CGDirectDisplayID(displayRaw)
+        let appOwnsPMSet = args[6] == "1"
 
         guard let (service, connection) = openRootDomain() else { exit(70) }
         defer {
             // Fail-safe cleanup. Repeating these operations is harmless and is
             // preferable to leaving a Mac unable to sleep after an app crash.
             _ = setClamshellSleepDisabled(false, connection: connection)
-            restorePMSetSleep()
+            if appOwnsPMSet { restorePMSetSleep() }
             restoreBrightness(from: brightnessPath, displayID: displayID)
             try? FileManager.default.removeItem(atPath: tokenPath)
             try? FileManager.default.removeItem(atPath: brightnessPath)
