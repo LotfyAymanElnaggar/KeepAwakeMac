@@ -24,7 +24,7 @@ struct AwakeMenuView: View {
     }
 
     var body: some View {
-        ScrollView {
+        ScrollView(.vertical) {
             VStack(alignment: .leading, spacing: 14) {
                 sessionHeader
                 Divider()
@@ -55,9 +55,12 @@ struct AwakeMenuView: View {
                 footer
             }
             .padding(16)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .frame(width: 400)
-        .frame(maxHeight: 690)
+        // MenuBarExtra's window style can collapse a root ScrollView when it
+        // only has a maximum height. Give the popover an explicit content
+        // size and let the ScrollView handle overflow inside that window.
+        .frame(width: 400, height: 620)
         .onAppear {
             manager.allowDisplaySleep = storedAllowDisplaySleep
             manager.lowBatteryCutoff = storedLowBatteryCutoff
