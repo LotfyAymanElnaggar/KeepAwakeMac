@@ -43,14 +43,14 @@ jobs:
             -parse-as-library \
             -O \
             -target arm64-apple-macos13.0 \
-            -framework SwiftUI -framework AppKit -framework IOKit \
+            -framework SwiftUI -framework AppKit -framework CoreGraphics -framework IOKit \
             -o build/arm64/KeepAwakeMac
 
           xcrun swiftc "${SRC[@]}" \
             -parse-as-library \
             -O \
             -target x86_64-apple-macos13.0 \
-            -framework SwiftUI -framework AppKit -framework IOKit \
+            -framework SwiftUI -framework AppKit -framework CoreGraphics -framework IOKit \
             -o build/x86_64/KeepAwakeMac
 
           lipo -create \
