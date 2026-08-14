@@ -17,15 +17,17 @@ final class AwakeManager: ObservableObject {
         stop(clearError: false)
         lastError = nil
 
-        let assertionType: CFString = allowDisplaySleep
+        let assertionTypeString = allowDisplaySleep
             ? kIOPMAssertionTypePreventUserIdleSystemSleep
             : kIOPMAssertionTypeNoDisplaySleep
+        let assertionType = assertionTypeString as NSString
+        let reason = "KeepAwakeMac session enabled by user" as NSString
 
         var newAssertionID: IOPMAssertionID = 0
         let result = IOPMAssertionCreateWithName(
             assertionType,
             IOPMAssertionLevel(kIOPMAssertionLevelOn),
-            "KeepAwakeMac session enabled by user" as CFString,
+            reason,
             &newAssertionID
         )
 
