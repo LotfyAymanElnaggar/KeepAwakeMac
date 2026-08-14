@@ -135,7 +135,7 @@ struct AwakeMenuView: View {
             Text("Display")
                 .font(.subheadline.weight(.semibold))
 
-            Toggle("Allow display to turn off", isOn: Binding(
+            Toggle("Allow display to go dark", isOn: Binding(
                 get: { storedAllowDisplaySleep },
                 set: { newValue in
                     storedAllowDisplaySleep = newValue
@@ -147,8 +147,8 @@ struct AwakeMenuView: View {
             ))
 
             Text(storedAllowDisplaySleep
-                 ? "The display may sleep while the Mac stays awake. In lid mode, KeepAwakeMac also forces display sleep when the lid closes and no external display is connected."
-                 : "Both the Mac and display are kept awake during the session, including lid mode.")
+                 ? "With the lid open, macOS may turn the display off normally while the system stays awake. With lid mode armed, closing the lid sets the built-in backlight to 0 instead of deliberately starting display sleep."
+                 : "The app also prevents idle display sleep. In lid mode, the built-in brightness is left unchanged.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -161,7 +161,11 @@ struct AwakeMenuView: View {
                 Label("MacBook lid", systemImage: "laptopcomputer")
                     .font(.subheadline.weight(.semibold))
                 Spacer()
-                if manager.sleepDisabledReadback {
+                if manager.lidClosedModeEnabled {
+                    Text(manager.kernelLidGuardActive ? "Kernel guard ON" : "Kernel guard OFF")
+                        .font(.caption.monospaced())
+                        .foregroundStyle(manager.kernelLidGuardActive ? .secondary : .red)
+                } else if manager.sleepDisabledReadback {
                     Text("SleepDisabled = 1")
                         .font(.caption.monospaced())
                         .foregroundStyle(.secondary)
@@ -169,14 +173,30 @@ struct AwakeMenuView: View {
             }
 
             if manager.lidClosedModeEnabled {
-                HStack(spacing: 8) {
-                    Label(manager.lidIsClosed ? "Lid closed" : "Lid open",
-                          systemImage: manager.lidIsClosed ? "rectangle.compress.vertical" : "rectangle.expand.vertical")
-                    if manager.hasExternalDisplay {
-                        Text("· external display")
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 8) {
+                        Label(manager.lidIsClosed ? "Lid closed" : "Lid open",
+                              systemImage: manager.lidIsClosed ? "rectangle.compress.vertical" : "rectangle.expand.vertical")
+                        if manager.hasExternalDisplay {
+                            Text("· external display")
+                        }
+                    }
+
+                    HStack(spacing: 6) {
+                        Text(manager.sleepDisabledReadback ? "SleepDisabled=1" : "SleepDisabled=0")
+                        Text("·")
+                        Text(manager.kernelSelectorStatus)
+                    }
+
+                    if let causesSleep = manager.appleClamshellCausesSleep {
+                        Text("AppleClamshellCausesSleep = \(causesSleep ? "Yes" : "No")")
+                    }
+
+                    if manager.backlightDimmed {
+                        Text("Built-in backlight = 0")
                     }
                 }
-                .font(.caption)
+                .font(.caption.monospaced())
                 .foregroundStyle(.secondary)
             }
 
@@ -221,7 +241,7 @@ struct AwakeMenuView: View {
                 .buttonStyle(.link)
                 .disabled(manager.lidChanging)
             } else {
-                Text("Lid-closed mode needs one administrator approval. The installed rule is narrowly limited to exactly two commands: turning macOS SleepDisabled on and off.")
+                Text("Lid mode uses two layers: a direct kernel clamshell guard plus macOS SleepDisabled. One administrator approval is needed only for the two SleepDisabled pmset commands.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -232,7 +252,7 @@ struct AwakeMenuView: View {
                 .disabled(manager.lidChanging)
             }
 
-            Label("Safety: do not use lid-closed mode inside a bag, sleeve, or other poorly ventilated space.", systemImage: "exclamationmark.triangle")
+            Label("Safety: the screen can be dark while CPU, Wi-Fi and storage are still running. Do not use lid mode inside a bag, sleeve, or other poorly ventilated space.", systemImage: "exclamationmark.triangle")
                 .font(.caption)
                 .foregroundStyle(.orange)
                 .fixedSize(horizontal: false, vertical: true)
@@ -244,7 +264,7 @@ struct AwakeMenuView: View {
             Text("Lock behavior")
                 .font(.subheadline.weight(.semibold))
 
-            Text("Keeping the computer running and requiring a password when the display turns off are separate macOS settings. If you want to reopen the lid without a login prompt, set ‘Require password after screen saver begins or display is turned off’ to Never in Lock Screen settings.")
+            Text("Closed-lid darkening now uses backlight brightness 0, so KeepAwakeMac does not intentionally start macOS's display-sleep password timer. With the lid open, normal macOS display sleep can still trigger your Lock Screen policy.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -293,14 +313,16 @@ struct AwakeMenuView: View {
 
     private var statusText: String {
         guard let remaining = manager.remainingSeconds else {
-            return manager.lidClosedModeEnabled ? "Active indefinitely · lid mode armed" : "Active indefinitely"
+            return manager.lidClosedModeEnabled
+                ? "Active indefinitely · kernel lid guard armed"
+                : "Active indefinitely"
         }
 
         let total = Int(remaining.rounded(.down))
         let hours = total / 3600
         let minutes = (total % 3600) / 60
         let seconds = total % 60
-        let suffix = manager.lidClosedModeEnabled ? " · lid mode" : ""
+        let suffix = manager.lidClosedModeEnabled ? " · kernel lid guard" : ""
 
         if hours > 0 {
             return String(format: "Active · %d:%02d:%02d remaining", hours, minutes, seconds) + suffix
