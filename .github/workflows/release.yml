@@ -1,0 +1,105 @@
+name: Publish GitHub Release
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - RELEASE_VERSION
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Read version
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="$(tr -d '[:space:]' < RELEASE_VERSION)"
+          test -n "$VERSION"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "TAG=v$VERSION" >> "$GITHUB_ENV"
+
+      - name: Build universal macOS app
+        shell: bash
+        run: |
+          set -euo pipefail
+          SRC=(
+            KeepAwakeMac/KeepAwakeMacApp.swift
+            KeepAwakeMac/AwakeManager.swift
+            KeepAwakeMac/AwakeMenuView.swift
+            KeepAwakeMac/SessionDuration.swift
+          )
+
+          mkdir -p build/arm64 build/x86_64 "build/KeepAwakeMac.app/Contents/MacOS"
+
+          xcrun swiftc "${SRC[@]}" \
+            -parse-as-library \
+            -O \
+            -target arm64-apple-macos13.0 \
+            -framework SwiftUI -framework AppKit -framework IOKit \
+            -o build/arm64/KeepAwakeMac
+
+          xcrun swiftc "${SRC[@]}" \
+            -parse-as-library \
+            -O \
+            -target x86_64-apple-macos13.0 \
+            -framework SwiftUI -framework AppKit -framework IOKit \
+            -o build/x86_64/KeepAwakeMac
+
+          lipo -create \
+            build/arm64/KeepAwakeMac \
+            build/x86_64/KeepAwakeMac \
+            -output "build/KeepAwakeMac.app/Contents/MacOS/KeepAwakeMac"
+
+          cp KeepAwakeMac/Info.plist "build/KeepAwakeMac.app/Contents/Info.plist"
+          /usr/libexec/PlistBuddy -c 'Set :CFBundleIdentifier com.lotfy.keepawakemac' "build/KeepAwakeMac.app/Contents/Info.plist"
+          /usr/libexec/PlistBuddy -c 'Set :CFBundleExecutable KeepAwakeMac' "build/KeepAwakeMac.app/Contents/Info.plist"
+          /usr/libexec/PlistBuddy -c 'Set :CFBundleName KeepAwakeMac' "build/KeepAwakeMac.app/Contents/Info.plist"
+          /usr/libexec/PlistBuddy -c 'Set :CFBundleDevelopmentRegion en' "build/KeepAwakeMac.app/Contents/Info.plist"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" "build/KeepAwakeMac.app/Contents/Info.plist"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $GITHUB_RUN_NUMBER" "build/KeepAwakeMac.app/Contents/Info.plist"
+
+          codesign --force --deep --sign - "build/KeepAwakeMac.app"
+          codesign --verify --deep --strict --verbose=2 "build/KeepAwakeMac.app"
+          file "build/KeepAwakeMac.app/Contents/MacOS/KeepAwakeMac"
+
+      - name: Create and verify DMG
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build/dmg
+          cp -R "build/KeepAwakeMac.app" build/dmg/
+          ln -s /Applications build/dmg/Applications
+          DMG="build/KeepAwakeMac-${VERSION}.dmg"
+          hdiutil create \
+            -volname "KeepAwakeMac ${VERSION}" \
+            -srcfolder build/dmg \
+            -ov \
+            -format UDZO \
+            "$DMG"
+          hdiutil verify "$DMG"
+          shasum -a 256 "$DMG" > build/SHA256SUMS.txt
+
+      - name: Publish release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          DMG="build/KeepAwakeMac-${VERSION}.dmg"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$DMG" build/SHA256SUMS.txt --clobber
+            gh release edit "$TAG" --title "KeepAwakeMac v${VERSION}" --notes-file RELEASE_NOTES.md
+          else
+            gh release create "$TAG" "$DMG" build/SHA256SUMS.txt \
+              --title "KeepAwakeMac v${VERSION}" \
+              --notes-file RELEASE_NOTES.md \
+              --latest
+          fi
