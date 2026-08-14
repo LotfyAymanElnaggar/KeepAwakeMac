@@ -13,18 +13,9 @@ A small native macOS menu-bar utility that keeps your Mac awake for a selected a
 
 ## Downloadable DMG
 
-Every push to `main` runs the GitHub Actions workflow in `.github/workflows/build-dmg.yml`. It builds a Release app and packages `KeepAwakeMac.dmg` as a workflow artifact.
+Every push to `main` runs the GitHub Actions workflow in `.github/workflows/build-dmg.yml`. It compiles a universal macOS app (Apple Silicon + Intel), ad-hoc signs it, creates `KeepAwakeMac.dmg`, verifies the disk image, and uploads it as the `KeepAwakeMac-DMG` workflow artifact.
 
-The CI build is ad-hoc signed, not notarized with an Apple Developer ID. On first launch macOS may ask you to confirm the app in Privacy & Security or open it with right-click > Open.
-
-## Run from source
-
-1. Open `KeepAwakeMac.xcodeproj` in Xcode.
-2. Select the `KeepAwakeMac` scheme and `My Mac` as the run destination.
-3. Press Run (Command-R).
-4. Look for the cup icon in the macOS menu bar.
-
-No special entitlement is required for the IOKit power assertion used by this project.
+The CI build is not notarized with an Apple Developer ID. On first launch macOS may ask you to confirm the app in Privacy & Security or open it with right-click > Open.
 
 ## Important macOS limitation
 
