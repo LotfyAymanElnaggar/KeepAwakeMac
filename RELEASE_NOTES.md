@@ -1,16 +1,23 @@
-# KeepAwakeMac v1.1.0
+# KeepAwakeMac v1.1.1
 
-This release changes lid-closed behavior substantially. Earlier test builds relied only on normal macOS power assertions, which are not sufficient for the physical MacBook lid-close sleep request.
+This patch fixes the menu-bar pop-up on macOS 27 beta. In v1.1.0, SwiftUI could collapse the root `ScrollView` in `MenuBarExtra` window style into a thin horizontal strip because the popover only had a maximum height and no explicit content height.
 
-## New
+## Fixed
 
-- **Verified lid-closed mode** using macOS `pmset -a disablesleep 1` in addition to normal IOKit keep-awake assertions.
-- **One-time administrator authorization** limited to exactly two commands: `pmset ... disablesleep 1` and `pmset ... disablesleep 0`.
-- **Read-back verification**: lid mode is only reported as armed when `pmset -g` reports `SleepDisabled = 1`.
-- **Crash/heartbeat watchdog** that attempts to restore `SleepDisabled = 0` if the app disappears while it owns the setting.
-- **Low-battery cutoff**, configurable to 10%, 15%, 20%, or 25%.
-- **Diagnostics** button that copies `pmset -g`, `pmset -g assertions`, battery state, and app state.
-- Clear separation between **keeping the Mac running** and **macOS Lock Screen password behavior**.
+- **Menu-bar pop-up sizing:** the window now opens at a stable 400 × 620 point content size.
+- The settings remain vertically scrollable when the full content does not fit.
+- The content stack explicitly fills the pop-up width instead of relying on the `ScrollView`'s ideal size.
+
+## Lid-closed mode included
+
+v1.1.1 retains the v1.1.0 lid-closed implementation:
+
+- `pmset -a disablesleep 1` for verified lid-closed operation in addition to normal IOKit keep-awake assertions.
+- One-time administrator authorization limited to exactly `pmset ... disablesleep 1` and `pmset ... disablesleep 0`.
+- Read-back verification through `pmset -g`; lid mode is only reported as armed when macOS reports `SleepDisabled = 1`.
+- Crash/heartbeat watchdog that attempts to restore `SleepDisabled = 0` if the app disappears while it owns the setting.
+- Configurable 10%, 15%, 20%, or 25% low-battery cutoff.
+- Copyable diagnostics for `pmset -g`, power assertions, battery state, and app state.
 - Universal DMG for Apple Silicon and Intel.
 
 ## Important safety note
@@ -19,11 +26,7 @@ Lid-closed mode disables normal system sleep globally for the duration of the mo
 
 ## macOS 27 beta
 
-This build is intended for testing on current macOS versions including macOS 27 beta. `disablesleep` is a system power-management setting rather than a normal public app API, so behavior can change between beta builds or hardware revisions. The app verifies the actual macOS read-back state and exposes diagnostics rather than assuming success.
-
-## Lock screen
-
-If the Mac keeps running with the lid closed but asks for a password when reopened, that is controlled separately by **System Settings > Lock Screen > Require password after screen saver begins or display is turned off**. KeepAwakeMac does not store your password or silently alter that security policy.
+This is a test build for current macOS versions including macOS 27 beta. `disablesleep` is a system power-management setting rather than a normal public app API, so behavior can change between beta builds or hardware revisions. KeepAwakeMac verifies the actual macOS read-back state rather than assuming success.
 
 ## Recovery
 
