@@ -1,4 +1,5 @@
 import Foundation
+import CoreGraphics
 import IOKit.pwr_mgt
 
 private struct ShellResult {
@@ -86,8 +87,6 @@ final class AwakeManager: ObservableObject {
     @Published var lowBatteryCutoff = 15
     @Published var lastError: String?
 
-    // This now means specifically: KeepAwakeMac's own sudoers fragment exists.
-    // It is intentionally NOT inferred from another app granting a similar command.
     @Published private(set) var lidAuthorizationInstalled = false
     @Published private(set) var lidClosedModeEnabled = false
     @Published private(set) var lidChanging = false
@@ -96,6 +95,11 @@ final class AwakeManager: ObservableObject {
     @Published private(set) var onBatteryPower = false
     @Published private(set) var lidStatusMessage: String?
     @Published private(set) var sudoConfigurationWarning: String?
+
+    // v1.2: physical lid + display-power state.
+    @Published private(set) var lidIsClosed = false
+    @Published private(set) var hasExternalDisplay = false
+    @Published private(set) var displaySleepStatus: String?
 
     private let ownershipKey = "KeepAwakeMac.ownsSleepDisabled"
     private let sudoersPath = "/etc/sudoers.d/keepawakemac"
@@ -110,9 +114,11 @@ final class AwakeManager: ObservableObject {
     private var ticker: Timer?
     private var safetyTimer: Timer?
     private var heartbeatTimer: Timer?
+    private var lidMonitorTimer: Timer?
     private var watchdogTokenPath: String?
     private var ownsSleepDisabled = false
     private var prepared = false
+    private var lastDisplaySleepRequestAt: Date?
 
     func prepareOnLaunch() async {
         guard !prepared else { return }
@@ -121,6 +127,7 @@ final class AwakeManager: ObservableObject {
         await refreshLidAuthorizationStatus()
         await refreshSleepDisabledState()
         await refreshBatteryState()
+        await refreshLidAndDisplayState(forceDisplaySleep: false)
 
         if UserDefaults.standard.bool(forKey: ownershipKey), sleepDisabledReadback {
             if pmsetPrivilegeAvailable {
@@ -198,6 +205,13 @@ final class AwakeManager: ObservableObject {
         guard isActive else { return }
         let remaining = endDate.map { max(1, $0.timeIntervalSinceNow) } ?? duration
         start(duration: remaining)
+
+        if lidClosedModeEnabled {
+            startLidMonitor()
+            Task { @MainActor [weak self] in
+                await self?.refreshLidAndDisplayState(forceDisplaySleep: true)
+            }
+        }
     }
 
     func stop() {
@@ -227,9 +241,6 @@ final class AwakeManager: ObservableObject {
         let safeRule = rule.replacingOccurrences(of: "'", with: "'\\''")
         let tempPath = "/tmp/keepawakemac.sudoers.\(getpid())"
 
-        // Important: validate ONLY our fragment. A global `visudo -c` can fail
-        // because of an unrelated third-party file (for example Amphetamine's
-        // PowerProtect fragment), even though our fragment is valid.
         let command = "umask 077; printf '%s\\n' '\(safeRule)' > '\(tempPath)' && /usr/sbin/visudo -cf '\(tempPath)' && /usr/sbin/chown root:wheel '\(tempPath)' && /bin/chmod 0440 '\(tempPath)' && /bin/mkdir -p /etc/sudoers.d && /bin/mv '\(tempPath)' '\(sudoersPath)' && /usr/sbin/visudo -cf '\(sudoersPath)'"
 
         let result = await ShellRunner.runAdministratorCommand(command)
@@ -255,8 +266,6 @@ final class AwakeManager: ObservableObject {
             await disableLidClosedModeIfOwned()
         }
 
-        // Remove only our file. Do NOT globally validate every sudoers.d file;
-        // a broken file belonging to another app must not make our removal fail.
         let result = await ShellRunner.runAdministratorCommand("/bin/rm -f '\(sudoersPath)'")
         await refreshLidAuthorizationStatus()
 
@@ -272,8 +281,6 @@ final class AwakeManager: ObservableObject {
     }
 
     func refreshLidAuthorizationStatus() async {
-        // File existence identifies OUR authorization. `sudo -l` alone cannot:
-        // another app such as Amphetamine can grant the same pmset commands.
         lidAuthorizationInstalled = FileManager.default.fileExists(atPath: sudoersPath)
 
         let one = await ShellRunner.run("/usr/bin/sudo", ["-n", "-l", "/usr/bin/pmset", "-a", "disablesleep", "1"])
@@ -326,6 +333,9 @@ final class AwakeManager: ObservableObject {
                 installWatchdog()
                 lidStatusMessage = "SleepDisabled=1 verified. Lid-closed mode is armed."
             }
+
+            startLidMonitor()
+            await refreshLidAndDisplayState(forceDisplaySleep: true)
             await refreshBatteryState()
             await enforceLowBatterySafetyIfNeeded()
         } else {
@@ -353,11 +363,13 @@ final class AwakeManager: ObservableObject {
         await refreshLidAuthorizationStatus()
         await refreshSleepDisabledState()
         await refreshBatteryState()
+        await refreshLidAndDisplayState(forceDisplaySleep: false)
 
         async let settings = ShellRunner.run("/usr/bin/pmset", ["-g"])
         async let assertions = ShellRunner.run("/usr/bin/pmset", ["-g", "assertions"])
         async let battery = ShellRunner.run("/usr/bin/pmset", ["-g", "batt"])
-        let (settingsResult, assertionsResult, batteryResult) = await (settings, assertions, battery)
+        async let clamshell = ShellRunner.run("/usr/sbin/ioreg", ["-r", "-k", "AppleClamshellState", "-d", "4"])
+        let (settingsResult, assertionsResult, batteryResult, clamshellResult) = await (settings, assertions, battery, clamshell)
 
         return """
         KeepAwakeMac diagnostics
@@ -366,6 +378,10 @@ final class AwakeManager: ObservableObject {
         KeepAwakeMac authorization file installed: \(lidAuthorizationInstalled)
         pmset privilege available: \(pmsetPrivilegeAvailable)
         Lid mode enabled in app: \(lidClosedModeEnabled)
+        Physical lid closed: \(lidIsClosed)
+        External display detected: \(hasExternalDisplay)
+        Display sleep preference: \(allowDisplaySleep)
+        Display sleep status: \(displaySleepStatus ?? "none")
         App owns SleepDisabled: \(ownsSleepDisabled)
         SleepDisabled readback: \(sleepDisabledReadback)
         Battery: \(batteryPercent.map(String.init) ?? "unknown")% / on battery: \(onBatteryPower)
@@ -383,6 +399,10 @@ final class AwakeManager: ObservableObject {
         --- pmset -g batt ---
         \(batteryResult.stdout)
         \(batteryResult.stderr)
+
+        --- ioreg clamshell ---
+        \(clamshellResult.stdout)
+        \(clamshellResult.stderr)
         """
     }
 
@@ -397,8 +417,89 @@ final class AwakeManager: ObservableObject {
         return sleepDisabledReadback == enabled
     }
 
+    // MARK: - Closed-lid display power
+
+    private func startLidMonitor() {
+        lidMonitorTimer?.invalidate()
+        lidMonitorTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                await self?.refreshLidAndDisplayState(forceDisplaySleep: false)
+            }
+        }
+    }
+
+    private func stopLidMonitor() {
+        lidMonitorTimer?.invalidate()
+        lidMonitorTimer = nil
+        lastDisplaySleepRequestAt = nil
+        displaySleepStatus = nil
+    }
+
+    private func refreshLidAndDisplayState(forceDisplaySleep: Bool) async {
+        let result = await ShellRunner.run("/usr/sbin/ioreg", ["-r", "-k", "AppleClamshellState", "-d", "4"])
+        let newClosedState = parseClamshellClosed(result.stdout)
+        let changedToClosed = newClosedState && !lidIsClosed
+        lidIsClosed = newClosedState
+        hasExternalDisplay = detectExternalDisplay()
+
+        guard lidClosedModeEnabled, allowDisplaySleep, lidIsClosed else {
+            if !lidIsClosed {
+                lastDisplaySleepRequestAt = nil
+                displaySleepStatus = nil
+            }
+            return
+        }
+
+        if hasExternalDisplay {
+            displaySleepStatus = "Lid closed · external display detected, so display sleep was not forced."
+            return
+        }
+
+        let stale = lastDisplaySleepRequestAt.map { Date().timeIntervalSince($0) >= 20 } ?? true
+        if forceDisplaySleep || changedToClosed || stale {
+            await requestDisplaySleepNow()
+        }
+    }
+
+    private func requestDisplaySleepNow() async {
+        // `pmset displaysleepnow` sleeps the display without sleeping the Mac.
+        // It does not require the privileged disablesleep sudo rule.
+        let result = await ShellRunner.run("/usr/bin/pmset", ["displaysleepnow"])
+        if result.succeeded {
+            lastDisplaySleepRequestAt = Date()
+            displaySleepStatus = "Lid closed · display sleep requested while the Mac remains awake."
+        } else {
+            displaySleepStatus = "Lid closed · display sleep command failed."
+            lastError = "The Mac is staying awake, but macOS rejected the display-sleep request: \(cleanError(result))"
+        }
+    }
+
+    private func detectExternalDisplay() -> Bool {
+        var count: UInt32 = 0
+        guard CGGetOnlineDisplayList(0, nil, &count) == .success, count > 0 else { return false }
+
+        var displays = [CGDirectDisplayID](repeating: 0, count: Int(count))
+        guard CGGetOnlineDisplayList(count, &displays, &count) == .success else { return false }
+
+        for display in displays.prefix(Int(count)) {
+            if CGDisplayIsBuiltin(display) == 0 {
+                return true
+            }
+        }
+        return false
+    }
+
+    private func parseClamshellClosed(_ text: String) -> Bool {
+        for line in text.components(separatedBy: .newlines) {
+            guard line.localizedCaseInsensitiveContains("AppleClamshellState") else { continue }
+            return line.localizedCaseInsensitiveContains("Yes")
+        }
+        return false
+    }
+
     private func disableLidClosedModeIfOwned() async {
         lidClosedModeEnabled = false
+        stopLidMonitor()
         removeWatchdogToken()
 
         let markerOwned = UserDefaults.standard.bool(forKey: ownershipKey)
@@ -424,6 +525,8 @@ final class AwakeManager: ObservableObject {
             Task { @MainActor in
                 guard let self else { return }
                 await self.refreshBatteryState()
+                await self.refreshSleepDisabledState()
+                await self.refreshLidAndDisplayState(forceDisplaySleep: false)
                 await self.enforceLowBatterySafetyIfNeeded()
             }
         }
@@ -487,6 +590,8 @@ final class AwakeManager: ObservableObject {
 
         if disarmLid, lidClosedModeEnabled || ownsSleepDisabled || UserDefaults.standard.bool(forKey: ownershipKey) {
             Task { @MainActor [weak self] in await self?.disableLidClosedModeIfOwned() }
+        } else if !lidClosedModeEnabled {
+            stopLidMonitor()
         }
         if clearError { lastError = nil }
     }
@@ -538,6 +643,7 @@ final class AwakeManager: ObservableObject {
         ticker?.invalidate()
         safetyTimer?.invalidate()
         heartbeatTimer?.invalidate()
+        lidMonitorTimer?.invalidate()
         if let activityToken { ProcessInfo.processInfo.endActivity(activityToken) }
         if displayAssertionID != 0 { IOPMAssertionRelease(displayAssertionID) }
         if idleSystemAssertionID != 0 { IOPMAssertionRelease(idleSystemAssertionID) }
