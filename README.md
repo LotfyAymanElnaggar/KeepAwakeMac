@@ -1,193 +1,223 @@
-# KeepAwakeMac
+<div align="center">
 
-A native macOS menu-bar utility for keeping a Mac awake for a selected duration or indefinitely, with an experimental **lid-closed mode** for MacBooks.
+# MacVigil
 
-## Download
+### Local work, uninterrupted.
 
-**Latest release:** https://github.com/LotfyAymanElnaggar/KeepAwakeMac/releases/latest
+**Keep AI agents, local models, builds, dev servers, renders, transfers, and long-running jobs working when you step away.**
 
-The downloadable DMG is a universal Apple Silicon + Intel build.
+[![Latest Release](https://img.shields.io/github/v/release/LotfyAymanElnaggar/KeepAwakeMac?display_name=tag&sort=semver)](https://github.com/LotfyAymanElnaggar/KeepAwakeMac/releases/latest)
+[![macOS](https://img.shields.io/badge/macOS-13%2B-black?logo=apple)](https://github.com/LotfyAymanElnaggar/KeepAwakeMac/releases/latest)
+[![Universal](https://img.shields.io/badge/Apple%20Silicon%20%2B%20Intel-universal-blue)](https://github.com/LotfyAymanElnaggar/KeepAwakeMac/releases/latest)
+[![License](https://img.shields.io/github/license/LotfyAymanElnaggar/KeepAwakeMac)](LICENSE)
 
-> GitHub test builds are ad-hoc signed rather than notarized with an Apple Developer ID. On first launch macOS may require right-click > **Open**, or approval under **System Settings > Privacy & Security**.
+[Download](https://github.com/LotfyAymanElnaggar/KeepAwakeMac/releases/latest) · [Roadmap](ROADMAP.md) · [Power efficiency](docs/POWER-EFFICIENCY.md) · [Use cases](docs/USE-CASES.md) · [Architecture](docs/ARCHITECTURE.md) · [Troubleshooting](docs/TROUBLESHOOTING.md)
 
-## Features
+</div>
 
-- Menu-bar only app; no Dock icon
-- 15 min, 30 min, 1 hour, 2 hours, custom, or indefinite keep-awake sessions
-- Multiple ordinary keep-awake layers: IOKit assertions, Foundation activity, and an active idle-sleep veto
-- Optional MacBook lid mode
-- Lid mode combines `pmset SleepDisabled` with a direct IOPM root-domain kernel clamshell guard
-- Physical lid monitoring and kernel-policy re-application during macOS 27 beta power transitions
-- Closed-lid built-in backlight brightness 0 without intentionally invoking display sleep/lock
-- Automatic brightness restoration when the lid opens or the session stops
-- External-display detection; built-in backlight override is skipped when an external display is online
-- Bundled crash-safety helper that restores lid policy, owned `SleepDisabled`, and saved brightness if the GUI disappears
-- Low-battery cutoff (10%, 15%, 20%, or 25%)
-- Detailed power, lid, assertion, backlight, and recent sleep/wake diagnostics
+> **Naming transition:** MacVigil is the product name being developed for this project. Current app bundles, release assets, paths, and diagnostics may still say **KeepAwakeMac** while the rebrand is completed safely.
 
-## Why lid-closed mode needs a separate kernel guard
+---
 
-Normal IOKit power assertions are designed to prevent ordinary idle sleep. macOS treats physical lid closure through a separate clamshell policy.
+## Why MacVigil exists
 
-On macOS 27 beta, real diagnostics from the test Mac showed all of the following at once:
+A Mac is no longer only an interactive desktop. It can be a local AI workstation, coding-agent host, Docker machine, build server, inference endpoint, render node, remote development box, or temporary home-lab server.
 
-```text
-SleepDisabled = Yes
-AppleClamshellCausesSleep = Yes
-Last Sleep Reason = Clamshell Sleep
-```
+Those workloads often need one simple guarantee:
 
-That means `pmset -a disablesleep 1` was accepted, yet a separate kernel lid policy still considered clamshell sleep valid.
+> **The job should keep running even when the human stops touching the computer.**
 
-KeepAwakeMac v1.3 therefore uses **two layers** while lid mode is armed:
+Traditional keep-awake tools solve the basic sleep problem. MacVigil's direction is more specific: **protect the runtime while wasting as little power as practical on things the workload does not need.**
 
-```sh
-pmset -a disablesleep 1
-```
+That means treating these as separate concerns:
 
-plus the IOPM root-domain user-client clamshell method used by macOS internally (`kPMSetClamshellSleepState`, external selector 12). The direct kernel layer sets the clamshell-sleep-disable mask that participates in the kernel's lid sleep decision.
+- keeping the CPU/system available,
+- keeping networking and storage work alive,
+- deciding whether the display should remain visible,
+- handling MacBook lid closure,
+- respecting battery and thermal safety,
+- and eventually ending protection when the actual job finishes.
 
-The app re-applies this guard on lid transitions, after wake, and periodically while lid mode remains armed because macOS 27 is beta software and can reevaluate power state dynamically.
+## Power-first philosophy
 
-When lid mode stops, KeepAwakeMac clears its kernel guard and, only if it owns the global pmset setting, restores:
+**Keeping the Mac awake should not automatically mean keeping the screen bright.**
 
-```sh
-pmset -a disablesleep 0
-```
+MacVigil is being designed around explicit runtime states:
 
-## Ordinary open-lid keep-awake sessions
+| Mode | Computer | Built-in display | Best for |
+|---|---|---|---|
+| **Full Awake** | Awake | Kept awake | presentations, monitoring, demos |
+| **Compute Guard** | Awake | May sleep normally | AI agents, builds, servers, downloads |
+| **Closed-Lid Runtime** | Awake | Built-in backlight darkened when possible | headless/local compute on a MacBook |
 
-When the main Keep Awake switch is on, the app combines:
+Current v1.3 closed-lid darkening saves the built-in display brightness and sets the **backlight brightness to 0**. That is intentionally different from claiming the entire display panel consumes zero power. A future goal is to measure and, where macOS allows it safely, reduce display power further without unintentionally locking or sleeping the user session.
 
-- `PreventSystemSleep`,
-- `PreventUserIdleSystemSleep`,
-- Foundation `idleSystemSleepDisabled`, and
-- `IORegisterForSystemPower` cancellation of ordinary `kIOMessageCanSystemSleep` requests.
+See [Power Efficiency](docs/POWER-EFFICIENCY.md) and the planned [Power Benchmarks](docs/POWER-BENCHMARKS.md).
 
-If **Allow display to go dark** is enabled, macOS is still allowed to switch the display off while those mechanisms keep the computer itself awake. A black display is therefore not by itself evidence that the Mac entered system sleep.
+## Built for modern local development
 
-Forced or emergency sleep remains under macOS control. KeepAwakeMac does not attempt to override shutdown, critical battery protection, thermal emergencies, or other mandatory system safety behavior.
-
-## Closed lid: dark panel without deliberately locking the session
-
-Earlier builds used `pmset displaysleepnow` after lid closure. That enters macOS's display-sleep path and can start the user's normal password-after-display-off timer.
-
-v1.3 no longer uses `displaysleepnow` for lid-close darkening.
-
-When lid mode is armed, **Allow display to go dark** is enabled, the physical lid is closed, and there is no external monitor, KeepAwakeMac:
-
-1. saves the built-in display's current brightness,
-2. sets the built-in backlight brightness to `0`, and
-3. restores the saved brightness when the lid opens or lid mode stops.
-
-This uses macOS DisplayServices. It makes the internal panel visually dark without KeepAwakeMac deliberately telling macOS to put the display session to sleep.
-
-Display authentication remains a macOS policy. Other events can still lock the session according to your system settings.
-
-## One-time administrator authorization
-
-The direct kernel clamshell control itself does not expand the sudo rule. Administrator permission is used only for the global `pmset` layer.
-
-KeepAwakeMac can install:
+MacVigil is especially useful when you leave work running locally:
 
 ```text
-/etc/sudoers.d/keepawakemac
+AI agent / build / server / transfer starts
+                  ↓
+            Vigil becomes active
+                  ↓
+        You stop using the keyboard
+                  ↓
+       Display may go dark to save power
+                  ↓
+        Compute + network stay available
+                  ↓
+             Job finishes
+                  ↓
+     Future: Vigil ends automatically
 ```
 
-with permission limited to exactly:
+Examples include:
 
-```text
-/usr/bin/pmset -a disablesleep 1
-/usr/bin/pmset -a disablesleep 0
-```
+- AI coding agents implementing, testing, or refactoring a repository
+- Ollama, LM Studio, MLX, llama.cpp, and other local-model runtimes
+- Xcode, Swift, Rust, C/C++, Node, Python, and Android builds
+- Docker / Docker Compose / local Kubernetes workloads
+- local web APIs, databases, MCP servers, and development servers
+- SSH, Tailscale, remote desktop, and remote development
+- long downloads, uploads, Git operations, backups, and sync jobs
+- Blender/video/audio rendering and batch exports
+- data science, notebooks, simulations, ETL, embeddings, and batch inference
 
-It does **not** grant unrestricted sudo access. The app validates only its own sudoers fragment with `visudo` before installing it. You can remove the authorization from the menu at any time.
+A broader catalog is in [Use Cases](docs/USE-CASES.md).
 
-See [SECURITY.md](SECURITY.md) for the security model.
+## What works today — v1.3
 
-## Crash-safety helper
+### Runtime protection
 
-The app bundle includes:
+- 15 min, 30 min, 1 h, 2 h, custom, or indefinite sessions
+- IOKit `PreventSystemSleep` assertion
+- IOKit `PreventUserIdleSystemSleep` assertion
+- Foundation `idleSystemSleepDisabled` activity
+- active veto of ordinary idle-sleep requests while a session is running
+- optional display-awake assertion when the display must stay visible
 
-```text
-KeepAwakeLidWatchdog
-```
+### Experimental MacBook closed-lid runtime
 
-This small companion runs only while lid mode is armed. The GUI updates a heartbeat file. If the GUI process crashes or the heartbeat becomes stale, the helper attempts to:
+On the macOS 27 beta test machine, `pmset -a disablesleep 1` alone was not enough: the kernel still reported `AppleClamshellCausesSleep = Yes` and recorded `Clamshell Sleep`.
 
-- release the kernel clamshell guard,
-- restore `SleepDisabled=0` only when KeepAwakeMac owned it,
-- restore saved built-in brightness, and
-- clean up temporary state files.
+v1.3 therefore combines:
 
-Normal shutdown performs the same cleanup directly.
+1. verified system-wide `SleepDisabled=1`, and
+2. the internal IOPM root-domain clamshell sleep guard used by macOS itself.
 
-## How to test lid mode
+The kernel guard is reinforced during lid/power transitions and by a companion watchdog.
 
-1. Install and launch KeepAwakeMac.
-2. Preferably connect power for the first test.
-3. Start an **Indefinite** Keep Awake session.
-4. Enable **Allow display to go dark**.
-5. Install Lid Authorization if needed.
-6. Enable **Keep running with lid closed**.
-7. Confirm the menu shows **Kernel guard ON** and `SleepDisabled=1`.
-8. Close the lid and verify a remote workload, SSH connection, download, or server continues.
-9. Reopen the lid and use **Copy Diagnostics**.
+### Display/backlight behavior
 
-The most useful v1.3 diagnostic fields are:
+When **Allow display to go dark** is enabled and the MacBook lid closes without an external display:
 
-```text
-Kernel lid guard active
-Kernel selector status
-Kernel selector return
-AppleClamshellCausesSleep readback
-Backlight dimmed by app
-Last idle-sleep veto
-Last system wake notification
-```
+- the app saves the built-in brightness,
+- sets the built-in backlight brightness to 0,
+- keeps the runtime protected,
+- and restores brightness when the lid reopens or the session ends.
 
-Diagnostics also include the last 80 lines of `pmset -g log`, which helps distinguish true system sleep from display-only sleep.
+This avoids deliberately invoking `pmset displaysleepnow` for closed-lid darkening, because full display sleep can interact with the user's normal lock/password policy.
+
+### Safety
+
+- configurable 10%, 15%, 20%, or 25% low-battery cutoff
+- crash/heartbeat watchdog
+- ownership tracking before restoring global `SleepDisabled`
+- diagnostics showing assertions, battery, lid state, kernel guard state, and recent sleep/wake logs
+- no password storage
+- narrow sudo authorization limited to two exact `pmset` commands
+
+See [SECURITY.md](SECURITY.md).
+
+## Install
+
+Download the newest DMG from:
+
+**https://github.com/LotfyAymanElnaggar/KeepAwakeMac/releases/latest**
+
+Current builds are universal for Apple Silicon and Intel and target macOS 13+.
+
+### Gatekeeper note
+
+The current experimental build is **ad-hoc signed**, not yet Developer ID notarized. On first launch, macOS may require right-click → **Open** or approval under **System Settings → Privacy & Security**.
+
+Proper Developer ID signing and notarization are roadmap priorities before broader public distribution.
+
+## Quick start
+
+1. Launch the app and find the menu-bar icon.
+2. Choose a duration.
+3. Leave **Allow display to go dark** enabled for compute-only work.
+4. Turn the session on.
+5. For experimental lid-closed use, install the one-time Lid Authorization and enable **Keep running with lid closed**.
+6. Confirm both the `SleepDisabled` and kernel-guard indicators before closing the lid.
+7. Use **Copy Diagnostics** if the Mac behaves unexpectedly.
+
+For detailed operation and recovery instructions, see [Troubleshooting](docs/TROUBLESHOOTING.md).
+
+## Where MacVigil is going
+
+The next major step is **job-aware, energy-aware runtime protection**.
+
+High-priority planned features include:
+
+- thermal safety using macOS thermal-pressure state
+- measured energy profiles and repeatable benchmarks
+- battery-energy budgets, not only percentage cutoffs
+- process/PID-based sessions
+- command-based sessions: keep awake until a command exits
+- local-port/server detection
+- Docker/container-aware sessions
+- AI-agent and local-model runtime presets
+- **Finish → restore normal sleep** workflows
+- notifications when unattended jobs complete or protection is stopped for safety
+- a small CLI for terminal-native workflows
+- Shortcuts/automation integration
+- Developer ID signing + notarization
+- Homebrew Cask distribution
+
+The full public plan is in [ROADMAP.md](ROADMAP.md).
+
+## A note on comparisons
+
+General-purpose tools such as Amphetamine already provide strong keep-awake automation, display-sleep controls, closed-display features, and battery conditions. MacVigil should not claim to consume less power merely because its positioning is power-focused.
+
+**The goal is to earn that claim with measurements.**
+
+The project will benchmark equivalent workloads and runtime states on the same hardware, publish the methodology, and optimize from measured results. See [Power Benchmarks](docs/POWER-BENCHMARKS.md).
+
+## Documentation
+
+| Document | Purpose |
+|---|---|
+| [ROADMAP.md](ROADMAP.md) | planned features and product direction |
+| [Power Efficiency](docs/POWER-EFFICIENCY.md) | energy philosophy, modes, and technical goals |
+| [Power Benchmarks](docs/POWER-BENCHMARKS.md) | repeatable measurement methodology |
+| [Use Cases](docs/USE-CASES.md) | AI, development, creative, research, server, and transfer scenarios |
+| [Architecture](docs/ARCHITECTURE.md) | current power-management design and cleanup model |
+| [Troubleshooting](docs/TROUBLESHOOTING.md) | diagnostics, recovery, and common failure modes |
+| [SECURITY.md](SECURITY.md) | privilege and watchdog security model |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | how to contribute safely |
 
 ## Safety
 
-**Do not put a MacBook in a bag, sleeve, drawer, or other poorly ventilated location while lid mode is armed.** A dark screen does not mean the CPU, GPU, Wi-Fi, storage, or other hardware has stopped running.
+Closed-lid runtime means the Mac can continue producing heat after the lid is shut.
 
-For beta testing, use external power when possible and consider setting the low-battery cutoff to **20% or 25%**.
+**Never use closed-lid mode in a bag, sleeve, drawer, or other poorly ventilated space.**
 
-Avoid running another utility that modifies `pmset disablesleep` at the same time because the setting is global rather than reference-counted.
+Battery and thermal safety must always take precedence over keeping a job alive. The app intentionally does not attempt to override critical-battery, thermal-emergency, shutdown, or other mandatory macOS safety behavior.
 
-## Emergency restore
+## Privacy
 
-If you suspect normal sleep did not return after testing:
+MacVigil is intended to work locally. The current app does not require an account and does not need your macOS password beyond the standard system administrator authorization dialog used to install the narrowly scoped lid-mode rule.
 
-```sh
-sudo pmset -a disablesleep 0
-```
+## Contributing
 
-Then quit and reopen KeepAwakeMac so its in-process kernel guard is also released. The bundled watchdog is designed to perform equivalent cleanup automatically after an app crash.
-
-Useful manual diagnostics:
-
-```sh
-pmset -g
-pmset -g assertions
-pmset -g batt
-pmset -g log
-ioreg -r -k AppleClamshellState -d 4
-```
-
-## Compatibility / private API note
-
-The kernel clamshell selector and DisplayServices brightness functions used for v1.3 lid behavior are internal/undocumented macOS mechanisms. They are not suitable for an App Store build and may change in future macOS releases or beta builds.
-
-KeepAwakeMac exposes the actual selector return code and power-state diagnostics rather than treating these mechanisms as guaranteed across every Mac and macOS release.
-
-## Build from source
-
-GitHub Actions builds the main Swift menu-bar app plus the watchdog companion for both arm64 and x86_64, combines them into universal binaries, ad-hoc signs the app bundle, verifies it, and packages the DMG.
-
-Source files are under `KeepAwakeMac/`; release automation is under `.github/workflows/`.
+Issues, hardware test reports, power measurements, and code contributions are welcome. Power-management changes can leave a machine unable to sleep if cleanup is wrong, so please read [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md) before changing lid or privilege code.
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+MIT — see [LICENSE](LICENSE).
